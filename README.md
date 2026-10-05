@@ -281,15 +281,6 @@ As principais medidas de mitigação são manter o conteúdo, a configuração d
 
 ---
 
-# Pontos a validar com o professor
-
-1. O uso de uma VM Ubuntu sobre VirtualBox é aceitável para o experimento?
-2. As 16 configurações e 5 repetições são adequadas ao escopo da disciplina?
-3. O cliente sintético simplificado é suficiente?
-4. É necessário utilizar HLS/DASH de forma mais próxima de um cenário real?
-5. `ab` ou `wrk` deve ser escolhido como ferramenta principal de geração de requisições?
-6. A taxa de rebuffering calculada pelo cliente é uma métrica adequada para o projeto?
-
 ---
 
 # Estrutura do repositório
