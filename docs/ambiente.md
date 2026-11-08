@@ -24,7 +24,7 @@ Rodada 3 (48 execuções) e rodada 2 (teste rápido) foram executadas pelo Davi 
 
 | Item | Valor |
 | --- | --- |
-| Ambiente | Linux (instalado direto ou VM: confirmar) |
+| Ambiente | Linux nativo (sem VM) |
 | CPU | modelo: ______ , **12 CPUs lógicas** (`nproc` = 12) |
 | Memória | ______ (`free -h`) |
 | Sistema operacional | ______ (`cat /etc/os-release`) |

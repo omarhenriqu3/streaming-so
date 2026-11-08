@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Execução automatizada do piloto, do zero, em uma VM Ubuntu (ou qualquer Linux com root).
+# Execução automatizada do piloto, do zero, em Ubuntu (ou qualquer Linux com root).
 # Uso:  sudo bash executar_piloto.sh [repeticoes] [duracao_s]
 #       (opcional) sudo ESPECTADORES=20 INTERVALO=0.2 NIVEIS="0 1 2 4" bash executar_piloto.sh 3 8
 set -euo pipefail

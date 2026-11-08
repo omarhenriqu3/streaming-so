@@ -18,7 +18,7 @@
 | `cgroup` | Nginx em um grupo com peso de CPU alto (v1: `cpu.shares=4096`; v2: `cpu.weight=400`) e o `stress-ng` em outro com peso baixo (128 / 10) |
 | `prioridade` | Nginx com `nice -15` |
 
-Detecta cgroup v1 ou v2 automaticamente. **Só o caminho v1 foi exercitado até agora** (container do piloto); o v2 (Ubuntu 24.04 da VM) está implementado, mas precisa ser conferido na primeira execução na VM.
+Detecta cgroup v1 ou v2 automaticamente. **Só o caminho v1 foi exercitado até agora** (container do piloto); o v2 (Ubuntu do Davi) está implementado, mas precisa ser conferido na primeira execução na VM.
 
 ## Métricas coletadas por execução
 

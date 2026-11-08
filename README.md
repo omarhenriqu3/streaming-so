@@ -8,7 +8,7 @@
 
 Este projeto investiga o impacto da contenção de CPU no desempenho de um servidor de streaming de vídeo e avalia se mecanismos de isolamento de CPU do Linux conseguem reduzir essa degradação.
 
-O experimento será executado em uma VM Ubuntu sobre VirtualBox. O servidor de streaming será o Nginx, com segmentos de vídeo pré-gerados. Um cliente sintético solicitará os segmentos continuamente enquanto processos concorrentes gerados pelo `stress-ng` disputam CPU com o servidor.
+O experimento será executado em uma máquina física com Linux nativo (sem máquina virtual). O servidor de streaming será o Nginx, com segmentos de vídeo pré-gerados. Um cliente sintético solicitará os segmentos continuamente enquanto processos concorrentes gerados pelo `stress-ng` disputam CPU com o servidor.
 
 Os resultados representam **esta plataforma experimental local** e não um provedor real de streaming em nuvem.
 
@@ -26,9 +26,9 @@ Os resultados representam **esta plataforma experimental local** e não um prove
 flowchart LR
     subgraph HOST["Notebook do pesquisador"]
         direction TB
-        subgraph VBOX["VirtualBox"]
+        subgraph VBOX["Linux nativo"]
             direction TB
-            subgraph VM["VM Ubuntu Server"]
+            subgraph VM["Ambiente de execução"]
                 direction LR
                 ORQ["Orquestrador<br/>Bash / Python"]
                 ISO["Isolamento de CPU<br/>taskset · cgroups v2 · nice/chrt"]
@@ -71,10 +71,9 @@ flowchart LR
 | CPU do host | 6 núcleos / 12 threads |
 | Memória do host | 8 GB |
 | Armazenamento | ~239 GB |
-| Hipervisor | Oracle VirtualBox |
-| VM | Ubuntu Server LTS |
-| vCPUs da VM | 2 |
-| RAM da VM | 1–2 GB |
+| Ambiente | Linux nativo (sem VM) |
+| Sistema operacional | A registrar (Ubuntu, kernel 7.0.0-43-generic) |
+| CPUs lógicas (N) | 12 |
 
 ## Software
 
@@ -88,7 +87,7 @@ flowchart LR
 | Cliente Python (`workloads/cliente_streaming.py`) | Requisições HTTP, latência e rebuffering (usado no piloto) |
 | ab / wrk | Previstos para a coleta definitiva (throughput máximo, cliente em C) |
 | /proc/PID/status | Context switches do worker do Nginx (usado no piloto) |
-| perf stat | Previsto para a VM; não funcionou no container do piloto |
+| perf stat | Opcional; não funcionou no container do piloto |
 | /proc/pressure/cpu | PSI de CPU |
 | Python / Bash | Cliente, orquestração e coleta |
 | Pandas / SciPy / Matplotlib | Análise e visualização |
@@ -153,8 +152,8 @@ A métrica central é a degradação provocada pela contenção e o quanto cada 
 | Latência | Tempo entre requisição e recebimento do segmento | Cliente Python |
 | P95 / P99 | Percentis de cauda da latência | Cliente Python |
 | Rebuffering | Segmentos que não chegam a tempo de manter a reprodução | Cliente Python |
-| Uso de CPU | CPU utilizada pelo Nginx | `/proc/PID/stat` (cgroups / `perf stat` na VM) |
-| Context switches | Trocas de contexto | `/proc/PID/status` (`perf stat` na VM) |
+| Uso de CPU | CPU utilizada pelo Nginx | `/proc/PID/stat` (cgroups) |
+| Context switches | Trocas de contexto | `/proc/PID/status` (`perf stat` opcional) |
 | PSI de CPU | Pressão causada pela indisponibilidade de CPU | `/proc/pressure/cpu` |
 
 Para as métricas numéricas serão consideradas, quando aplicável: média, mediana, desvio padrão, p95 e p99.
@@ -193,7 +192,7 @@ As execuções são feitas em ordem sorteada (e não em blocos de 5 repetições
 
 ```mermaid
 flowchart TD
-    A["Preparar VM e ambiente"] --> B["Configurar Nginx e segmentos"]
+    A["Preparar a máquina e o ambiente"] --> B["Configurar Nginx e segmentos"]
     B --> C["Validar cliente e coleta"]
     C --> D["Executar piloto"]
     D --> E["Selecionar configuração"]
@@ -214,7 +213,7 @@ flowchart TD
 
 ### Etapas
 
-1. Preparar a VM.
+1. Preparar a máquina Linux.
 2. Configurar o Nginx e os segmentos de vídeo.
 3. Validar o cliente sintético.
 4. Registrar o ambiente em `docs/ambiente.md`.
@@ -264,11 +263,11 @@ Colunas do CSV:
 
 # Limitações e ameaças à validade
 
-- **Plataforma local:** os resultados representam a VM Ubuntu utilizada no experimento.
-- **Recursos limitados:** a VM possui apenas 1–2 GB de RAM.
+- **Plataforma local:** os resultados representam a máquina Linux utilizada no experimento.
+- **Recursos limitados:** a máquina possui 8 GB de RAM e 12 CPUs lógicas.
 - **Carga sintética:** `stress-ng` não representa perfeitamente uma aplicação real.
 - **Cliente sintético:** o comportamento é simplificado e não reproduz toda a dinâmica de clientes reais.
-- **Virtualização:** o VirtualBox adiciona uma camada de virtualização que pode influenciar os resultados.
+- **Hardware único:** os resultados valem para essa máquina; outras podem saturar em níveis diferentes.
 - **Streaming simplificado:** o experimento não pretende reproduzir integralmente um serviço comercial de streaming.
 
 As principais medidas de mitigação são manter o conteúdo, a configuração do cliente e o procedimento constantes, monitorar memória/swap e registrar o ambiente antes das coletas.

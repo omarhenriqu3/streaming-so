@@ -1,78 +1,522 @@
-\documentclass[a4paper,12pt]{article}
+\documentclass[12pt,a4paper]{article}
+
+% ---------------------------------------------------------
+% PACOTES
+% ---------------------------------------------------------
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage{times}
+\usepackage[brazil]{babel}
+\usepackage{lmodern}
 \usepackage{geometry}
+\usepackage{setspace}
 \usepackage{indentfirst}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{float}
 \usepackage{hyperref}
-\geometry{margin=2.5cm}
+\usepackage{amsmath}
+\usepackage{tikz}
 
-\title{Streaming sob Contenção de Recursos: Impacto de Mecanismos de Escalonamento e Isolamento de CPU no Desempenho de um Servidor de Streaming de Vídeo}
-\author{Omar Henrique Macedo Alves \and Davi Patricio}
-\date{Outubro de 2026}
+\usetikzlibrary{positioning,arrows.meta}
 
+% ---------------------------------------------------------
+% CONFIGURAÇÃO DOS LINKS
+% ---------------------------------------------------------
+\hypersetup{hidelinks}
+
+% ---------------------------------------------------------
+% CONFIGURAÇÕES DA PÁGINA
+% ---------------------------------------------------------
+\geometry{
+    a4paper,
+    left=3cm,
+    right=2cm,
+    top=3cm,
+    bottom=2cm
+}
+
+\onehalfspacing
+\setlength{\parindent}{1.25cm}
+
+% ---------------------------------------------------------
+% INFORMAÇÕES
+% ---------------------------------------------------------
+\title{
+    \textbf{Streaming sob Contenção de Recursos}\\
+    \large Avaliação de desempenho em ambiente Linux
+}
+
+\author{
+    Omar Henrique\\
+    Instituto Federal da Paraíba -- IFPB
+}
+
+\date{\today}
+
+% ---------------------------------------------------------
+% DOCUMENTO
+% ---------------------------------------------------------
 \begin{document}
 
-\maketitle
+% =========================================================
+% CAPA
+% =========================================================
+\begin{titlepage}
+\begin{center}
 
+\textbf{INSTITUTO FEDERAL DA PARAÍBA -- IFPB}
+
+\vspace{1cm}
+
+\textbf{DISCIPLINA: SISTEMAS OPERACIONAIS}
+
+\vfill
+
+{\Large \textbf{STREAMING SOB CONTENÇÃO DE RECURSOS}}
+
+\vspace{0.5cm}
+
+{\large Avaliação de desempenho em ambiente Linux}
+
+\vfill
+
+\textbf{Omar Henrique e Davi Patrício}
+
+\vfill
+
+João Pessoa -- PB
+
+\the\year
+
+\end{center}
+\end{titlepage}
+
+% =========================================================
+% SUMÁRIO
+% =========================================================
+\tableofcontents
+\newpage
+
+% =========================================================
+% 1. INTRODUÇÃO
+% =========================================================
 \section{Introdução}
 
-O streaming de vídeo é hoje a principal forma de distribuição de conteúdo audiovisual pela internet, baseando-se tipicamente na entrega de pequenos segmentos de vídeo via HTTP (como nos esquemas HLS e DASH), que o cliente solicita e reproduz em sequência. A qualidade percebida pelo usuário depende diretamente da capacidade do servidor de entregar esses segmentos com vazão (\emph{throughput}) suficiente e latência baixa e estável: uma entrega lenta ou irregular provoca \emph{rebuffering} — a interrupção da reprodução enquanto o cliente espera por dados —, um dos eventos mais prejudiciais à experiência do usuário em serviços de streaming.
+O streaming de vídeo é uma aplicação que depende da capacidade do sistema
+computacional de atender requisições de forma eficiente e contínua. Nesse
+contexto, a disputa por recursos, principalmente pela CPU, pode afetar o
+desempenho do servidor e a entrega dos conteúdos ao cliente.
 
-Para reduzir custos de infraestrutura, provedores de streaming frequentemente consolidam múltiplos clientes e serviços em um mesmo servidor físico, o que gera disputa por recursos computacionais — especialmente CPU — entre os processos concorrentes. Essa disputa é mediada pelo sistema operacional, que decide a cada instante qual processo recebe tempo de execução em qual núcleo. O escalonador padrão do Linux (CFS — \emph{Completely Fair Scheduler}) busca distribuir o tempo de CPU de forma equilibrada entre os processos, mas essa equidade pode ser prejudicial justamente para um processo crítico de latência, como o servidor de streaming: um atraso momentâneo na geração ou no envio de um segmento de vídeo é percebido pelo cliente como uma queda de qualidade ou um engasgo na reprodução. Mecanismos do sistema operacional como afinidade de CPU (\emph{CPU affinity}), \emph{cgroups}, prioridades de processo e isolamento de núcleos podem, em princípio, proteger esse processo crítico da contenção gerada por outros processos, mas o quanto cada mecanismo efetivamente reduz essa degradação é uma questão empírica.
+Este projeto tem como objetivo analisar o impacto da contenção de CPU sobre
+um servidor de streaming, comparar mecanismos de isolamento e priorização
+disponíveis no Linux e propor uma \textbf{mitigação adaptativa}: um
+controlador que detecta a contenção a partir de sinais do escalonador,
+coletados com eBPF, e ajusta automaticamente os limites de CPU para proteger
+o servidor.
 
-Este trabalho tem como objetivo investigar, de forma experimental, o impacto de mecanismos de isolamento de CPU do sistema operacional Linux sobre o desempenho de um servidor de streaming de vídeo, quando esse servidor está sujeito a diferentes níveis de contenção de recursos causada por processos concorrentes. A questão de pesquisa que orienta o estudo é: \emph{qual é o impacto de mecanismos de isolamento de CPU (afinidade de CPU, cgroups e prioridades de processo) sobre o desempenho (throughput, latência de resposta e taxa de rebuffering) de um servidor de streaming de vídeo, quando esse servidor está sujeito a contenção de recursos causada por processos concorrentes?} A hipótese adotada é a de que, sem qualquer isolamento, o aumento da contenção degrada progressivamente o desempenho do servidor de streaming, e que a aplicação de mecanismos de isolamento — em especial a combinação de CPU affinity, cgroups e prioridade elevada — atenua significativamente essa degradação.
+O experimento será realizado diretamente em uma máquina física com Linux
+instalado, sem a utilização de máquina virtual. O Nginx será utilizado como
+servidor para disponibilizar segmentos de vídeo, enquanto o
+\textit{stress-ng} será utilizado para gerar diferentes níveis de carga
+sobre a CPU. O projeto segue três etapas: \textit{baseline} (sem
+perturbação), perturbação (contenção de CPU) e mitigação (mecanismos estáticos
+e adaptativo).
 
-O restante deste documento está organizado da seguinte forma: a Seção~\ref{sec:fundamentacao} apresenta a fundamentação teórica sobre escalonamento de processos, isolamento de CPU e as particularidades de desempenho de servidores de streaming; a Seção~\ref{sec:metodologia} descreve a metodologia experimental utilizada para investigar a questão de pesquisa proposta.
+\subsection{Questões de Pesquisa}
 
+\begin{description}
+    \item[RQ1] Como diferentes níveis de contenção de CPU afetam a latência
+    (P95/P99) e o rebuffering de um servidor de streaming?
+    \item[RQ2] Os mecanismos estáticos de isolamento (afinidade, cgroups e
+    prioridade) reduzem esse impacto?
+    \item[RQ3] A espera do Nginx na fila de execução, medida com eBPF,
+    explica o aumento da latência?
+    \item[RQ4] Uma mitigação adaptativa, guiada por essa espera, reduz a
+    latência com menor custo para a carga concorrente do que o isolamento
+    estático?
+\end{description}
+
+\subsection{Hipóteses}
+
+\begin{description}
+    \item[H1] A latência P99 e o rebuffering aumentam com o nível de contenção.
+    \item[H2] Ao menos um mecanismo estático reduz o P99 em relação ao cenário
+    sem isolamento sob contenção alta.
+    \item[H3] A espera na fila de execução cresce com a contenção e acompanha
+    o aumento do P99.
+    \item[H4] A mitigação adaptativa reduz o P99 em relação ao cenário sem
+    isolamento, penalizando menos a carga concorrente que um limite fixo.
+\end{description}
+
+Um resultado negativo também é válido: ele pode indicar que o gargalo não era
+a CPU, que o sinal escolhido não representa o problema ou que a política
+precisa ser ajustada.
+
+% =========================================================
+% 2. FUNDAMENTAÇÃO TEÓRICA
+% =========================================================
 \section{Fundamentação Teórica}
-\label{sec:fundamentacao}
 
-\subsection{Escalonamento de processos no Linux}
+\subsection{Streaming de Vídeo}
 
-O escalonador de processos é o componente do sistema operacional responsável por decidir qual processo, dentre todos os prontos para execução, recebe a CPU em cada instante. O escalonador padrão das distribuições Linux modernas é o CFS (\emph{Completely Fair Scheduler}), que busca aproximar o tempo de CPU recebido por cada processo ao que ele receberia em um sistema idealmente justo, no qual todos os processos prontos compartilham a CPU simultaneamente e de forma equitativa. Esse critério de equidade é adequado para a maioria das cargas de trabalho de propósito geral, mas não garante, por si só, baixa latência para um processo específico quando o número de processos concorrentes aumenta: quanto mais processos disputando a mesma CPU, maior tende a ser o intervalo entre duas execuções consecutivas de um processo qualquer, incluindo um processo sensível a latência como um servidor de streaming que precisa responder prontamente a cada requisição de segmento de vídeo.
+O streaming de vídeo consiste na disponibilização de conteúdo audiovisual
+pela rede, permitindo que o cliente receba os dados de forma progressiva.
+Neste projeto, o conteúdo será dividido em segmentos que serão solicitados
+pelo cliente ao servidor por meio de requisições HTTP.
 
-\subsection{Mecanismos de isolamento e priorização de CPU}
+Atrasos na entrega dos segmentos podem afetar a continuidade da reprodução,
+tornando o desempenho do servidor um fator importante para a aplicação. O
+cliente usado é sintético: ele não reproduz vídeo real (HLS/DASH), mas
+requisita segmentos de 400~KB e usa como proxy de \textit{rebuffering} a
+fração de segmentos entregues acima de um limite de tempo.
 
-O Linux oferece diversos mecanismos que permitem modificar o comportamento padrão do escalonador para processos específicos. A \emph{afinidade de CPU} (CPU affinity) permite restringir um processo a executar apenas em um subconjunto definido de núcleos, reduzindo a migração entre núcleos e, quando combinada com o isolamento desses núcleos para outros processos (via \emph{isolcpus} ou \emph{cpuset}), pode garantir acesso quase exclusivo a um núcleo físico. Os \emph{cgroups} (\emph{control groups}) permitem agrupar processos e aplicar limites ou garantias de recursos — como uma quantidade mínima garantida de tempo de CPU (via \texttt{cpu.weight}) ou um teto máximo de uso (via \texttt{cpu.max}) — ao grupo como um todo. As \emph{prioridades de processo}, ajustáveis por meio do valor de \emph{nice} ou, de forma mais agressiva, por políticas de escalonamento de tempo real (via \texttt{chrt}), alteram a probabilidade de um processo ser escolhido para execução em relação aos demais. Cada um desses mecanismos atua em um nível diferente — alocação espacial (em qual núcleo um processo roda), alocação temporal (quanto tempo de CPU um processo recebe) e prioridade relativa (quão cedo um processo é escolhido) — e podem ser combinados para proteger processos críticos de latência, como um servidor de streaming, da contenção causada por processos concorrentes.
+\subsection{Contenção de CPU e Fila de Execução}
 
-\subsection{Desempenho em servidores de streaming de vídeo}
+A contenção de CPU ocorre quando diferentes processos competem
+simultaneamente pelo processamento disponível. Cada CPU lógica mantém uma
+fila de execução (\textit{run queue}); quando há mais tarefas prontas do que
+CPUs, uma tarefa passa a esperar na fila antes de executar e pode ser
+preemptada por outras (troca de contexto involuntária).
 
-Em servidores de streaming, o desempenho percebido pelo cliente depende de dois aspectos complementares: a vazão sustentada de entrega de dados (\emph{throughput}), necessária para acompanhar a taxa de bits do vídeo sem acumular atraso, e a regularidade/latência de resposta a cada requisição de segmento, cuja variação é crítica para evitar \emph{rebuffering} — a interrupção perceptível da reprodução enquanto o cliente espera por dados. As métricas usuais para caracterizar esse desempenho incluem o throughput efetivo, a latência de resposta por segmento solicitado, métricas de latência de cauda como os percentis 95 e 99 (p95/p99) — que capturam os piores casos de atraso, frequentemente mais relevantes para a experiência do usuário do que a média —, e a própria taxa de rebuffering observada pelo cliente. Esses indicadores estão diretamente relacionados a métricas internas do sistema operacional, como o número de trocas de contexto (\emph{context switches}) sofridas pelo processo do servidor e o PSI (\emph{Pressure Stall Information}) de CPU, que quantifica o tempo em que processos ficaram impedidos de executar por falta de CPU disponível. A relação entre esses mecanismos e indicadores de sistema operacional e o desempenho observável de um servidor de streaming, sob diferentes níveis de contenção por recursos, é o problema central investigado neste trabalho.
+Para um servidor de streaming, a cadeia de efeitos é: contenção $\rightarrow$
+espera na fila de execução $\rightarrow$ aumento da latência de cada
+requisição $\rightarrow$ aumento da cauda de latência (P95/P99) $\rightarrow$
+rebuffering. Neste projeto, a contenção será produzida de forma controlada
+utilizando o \textit{stress-ng}.
 
+\subsection{Isolamento e Priorização no Linux}
+
+O Linux disponibiliza mecanismos que permitem controlar a execução dos
+processos e sua utilização dos recursos computacionais.
+
+Entre os mecanismos utilizados neste projeto estão a afinidade de CPU, por
+meio do \textit{taskset} (\texttt{sched\_setaffinity}), os cgroups v2 e
+mecanismos de prioridade de processos, como \textit{nice/chrt}. Nos cgroups v2
+destacam-se \texttt{cpu.weight}, que define a fração proporcional de CPU
+quando há disputa, e \texttt{cpu.max}, que impõe um teto de CPU ao grupo.
+
+Esses mecanismos serão comparados para verificar seus efeitos sobre o
+desempenho do servidor durante situações de contenção.
+
+\subsection{eBPF e Observabilidade do Escalonador}
+
+O eBPF permite executar pequenos programas verificados dentro do kernel,
+associados a eventos como os do escalonador, sem alterar o código do kernel.
+Com ele é possível medir o tempo que o Nginx espera na fila de execução, por
+meio de \textit{bpftrace} ou da ferramenta \textit{runqlat}. Como
+alternativas e fontes complementares, serão usados o contador
+\texttt{run\_delay} em \texttt{/proc/PID/schedstat} (exige
+\texttt{kernel.sched\_schedstats=1}), as trocas de contexto em
+\texttt{/proc/PID/status} e a pressão de CPU (PSI) em
+\texttt{/proc/pressure/cpu}.
+
+Um programa de \textit{tracing} apenas observa: ele não altera prioridades.
+Por isso, a ação é executada por um controlador em espaço de usuário. O
+\textit{sched\_ext}, disponível no kernel utilizado (ver
+Seção~\ref{sec:ambiente}), permite que o próprio escalonador seja escrito em
+eBPF; ele será avaliado como modo opcional (Seção~\ref{sec:fatores}).
+
+\subsection{Mitigação Adaptativa}
+
+A mitigação adaptativa é um laço fechado: medir a espera do Nginx na fila
+$\rightarrow$ detectar contenção $\rightarrow$ decidir por limiar $\rightarrow$
+ajustar \texttt{cpu.weight} e/ou \texttt{cpu.max} do grupo que gera a carga
+$\rightarrow$ medir novamente. O controlador observa a espera em janelas
+periódicas e só age quando o limiar é excedido por janelas consecutivas;
+as ações são graduais e reversíveis, com histerese para relaxar os limites
+quando a contenção cessa. Os parâmetros iniciais (período de cerca de 200~ms,
+degraus de \texttt{cpu.weight}, tetos de \texttt{cpu.max} como 50\% e 25\%)
+são valores a calibrar com dados reais, não valores universais.
+
+Por segurança, o controlador inicia em modo observação (apenas registra a
+decisão), atua somente sobre processos do experimento, respeita limites
+mínimo e máximo, tem intervalo mínimo entre ações e restaura os valores
+originais ao final.
+
+% =========================================================
+% 3. METODOLOGIA EXPERIMENTAL
+% =========================================================
 \section{Metodologia Experimental}
-\label{sec:metodologia}
 
-\subsection{Arquitetura do ambiente experimental}
+\subsection{Arquitetura do Ambiente Experimental}
 
-O ambiente experimental é inteiramente executado dentro de uma máquina virtual Ubuntu Linux, acessada via SSH a partir do host físico. Dentro da VM executam-se três componentes: (i) o servidor de streaming, servindo segmentos de vídeo via HTTP (em um esquema semelhante a HLS/DASH); (ii) um cliente sintético, que solicita continuamente segmentos de vídeo ao servidor, simulando a reprodução de um stream em tempo real; e (iii) processos de carga concorrente, gerados com a ferramenta \texttt{stress-ng}, que disputam CPU com o processo do servidor. Um script de controle é responsável por aplicar (ou não) os mecanismos de isolamento de CPU ao processo do servidor, iniciar os processos de carga no nível de contenção desejado, executar o teste por um período fixo e coletar as métricas de desempenho ao final de cada execução.
+O experimento será realizado diretamente em uma máquina física com Linux
+instalado, sem utilização do VirtualBox ou de máquina virtual. As configurações
+do sistema operacional e do hardware serão registradas antes dos testes.
 
-\subsection{Hardware e software}
+O orquestrador será responsável por configurar os cenários, iniciar as
+cargas, o monitor eBPF e o controlador, executar o cliente e coletar os
+resultados.
 
-A VM convidada (Ubuntu Server) é configurada com ao menos duas vCPUs e entre 1 e 2~GB de RAM — recursos modestos, uma vez que o experimento não depende de múltiplas VMs simultâneas. O host físico possui um processador com 6 núcleos e 12 \emph{threads}, 8~GB de RAM e aproximadamente 239~GB de armazenamento, executando o hipervisor Oracle VirtualBox. O servidor de streaming é implementado com Nginx (servindo segmentos de vídeo pré-gerados) ou um servidor HTTP próprio; o cliente sintético é implementado em Python; a geração de carga concorrente utiliza o \texttt{stress-ng}; os mecanismos de isolamento são aplicados via \texttt{taskset} (CPU affinity), \emph{cgroups} v2 (\texttt{cpu.max}/\texttt{cpu.weight}) e \texttt{nice}/\texttt{chrt} (prioridades).
+A arquitetura do ambiente é apresentada na Figura~\ref{fig:arquitetura}.
 
-\subsection{Fatores e configurações comparadas}
+\begin{figure}[H]
+    \centering
+    \begin{tikzpicture}[
+        >=Stealth,
+        caixa/.style={
+            draw,
+            rounded corners=3pt,
+            align=center,
+            minimum height=1cm,
+            text width=3.2cm,
+            inner sep=6pt
+        },
+        fluxo/.style={-{Stealth}, thick}
+    ]
 
-O fator experimental principal é o modo de isolamento aplicado ao processo do servidor de streaming, com quatro níveis: (a) sem isolamento (configuração padrão do escalonador); (b) CPU affinity, com o processo restrito a um núcleo dedicado; (c) \emph{cgroups}, com garantia mínima de tempo de CPU para o processo; e (d) prioridade elevada, via \texttt{nice}/\texttt{chrt}. O fator secundário é a intensidade da contenção, definida como o número de processos concorrentes de carga gerados pelo \texttt{stress-ng}, variando em quatro níveis: 0, 2, 4 e 8 processos. O cliente sintético mantém sempre a mesma taxa de solicitação de segmentos em todas as configurações, de modo a isolar o efeito do isolamento de CPU e da contenção sobre o desempenho do servidor.
+    \node[caixa, text width=3.4cm] (maquina)
+        {Máquina física\\Linux nativo};
+
+    \node[caixa, below left=1.25cm and 2.0cm of maquina] (stress)
+        {\textit{stress-ng}\\Carga de CPU};
+
+    \node[caixa, below=1.25cm of maquina] (cliente)
+        {Cliente de requisições HTTP\\Streaming em Python};
+
+    \node[caixa, below right=1.25cm and 2.0cm of maquina] (nginx)
+        {Nginx\\Servidor HTTP};
+
+    \node[caixa, below=1.35cm of nginx] (segmentos)
+        {Segmentos de vídeo};
+
+    \node[caixa, below=1.35cm of cliente] (metricas)
+        {Coleta de métricas e\\registro dos resultados};
+
+    \node[caixa, below=1.35cm of stress] (controlador)
+        {Controlador adaptativo\\(cgroups v2)};
+
+    \node[caixa, below=1.35cm of metricas] (monitor)
+        {Monitor eBPF\\Espera na fila de execução};
+
+    \draw[fluxo] (maquina.south west) -- (stress.north);
+    \draw[fluxo] (maquina.south) -- (cliente.north);
+    \draw[fluxo] (maquina.south east) -- (nginx.north);
+
+    \draw[fluxo] (cliente.east) -- node[above, font=\small, align=center]
+        {Requisições HTTP} (nginx.west);
+
+    \draw[fluxo] (nginx.south) -- (segmentos.north);
+    \draw[fluxo] (cliente.south) -- (metricas.north);
+
+    % Mitigação adaptativa
+    \draw[fluxo, dashed] (nginx.east) -- ++(0.7,0) |- (monitor.east);
+    \draw[fluxo] (monitor.west) -| node[above, pos=0.2, font=\small]
+        {sinal} (controlador.south);
+    \draw[fluxo] (controlador.north) -- node[right, font=\small]
+        {\texttt{cpu.max}/\texttt{cpu.weight}} (stress.south);
+
+    \end{tikzpicture}
+    \caption{Arquitetura do ambiente experimental em Linux nativo, com o
+    monitor eBPF e o controlador adaptativo (setas tracejadas: observação).}
+    \label{fig:arquitetura}
+\end{figure}
+
+\subsection{Hardware e Software}
+\label{sec:ambiente}
+
+O experimento será executado diretamente em uma máquina física com Linux
+instalado. As características do hardware, a distribuição Linux e a versão
+do kernel serão registradas antes da realização dos experimentos.
+
+\begin{table}[H]
+\centering
+\caption{Hardware e configuração do ambiente experimental.}
+\label{tab:hardware}
+\begin{tabular}{ll}
+\toprule
+\textbf{Componente} & \textbf{Especificação} \\
+\midrule
+Processador & AMD Ryzen 5 5500U \\
+Núcleos / threads & 6 núcleos / 12 threads \\
+Memória RAM & 8 GB \\
+Processadores lógicos disponíveis ($N$) & 12 \\
+Versão do kernel & 7.0.0-43-generic \\
+Suporte a \textit{sched\_ext} & Sim (\texttt{/sys/kernel/sched\_ext}) \\
+Armazenamento disponível & A registrar \\
+Sistema operacional & Distribuição Linux a registrar \\
+Ambiente de execução & Máquina física (Linux nativo) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Os principais softwares utilizados serão:
+
+\begin{itemize}
+    \item Nginx: servidor HTTP (1 \textit{worker});
+    \item Python: cliente de streaming, orquestrador e controlador;
+    \item \textit{stress-ng}: geração de carga de CPU;
+    \item \textit{bpftrace} (e \textit{runqlat}): espera na fila de execução;
+    \item \textit{taskset}: afinidade de CPU;
+    \item cgroups v2: controle de recursos (\texttt{cpu.weight}, \texttt{cpu.max});
+    \item \textit{nice/chrt}: prioridade de processos;
+    \item PSI e \texttt{/proc}: pressão de CPU, trocas de contexto e \texttt{schedstat};
+    \item \textit{wrk} (opcional): vazão máxima do servidor;
+    \item \textit{cpupower}: governador de CPU em \textit{performance};
+    \item \textit{scx\_lavd} (opcional): escalonador \textit{sched\_ext}.
+\end{itemize}
+
+\subsection{Fatores e Configurações Comparadas}
+\label{sec:fatores}
+
+Serão comparados cinco modos:
+
+\begin{itemize}
+    \item sem isolamento;
+    \item afinidade de CPU;
+    \item cgroups v2 (limites estáticos);
+    \item prioridade de processos;
+    \item \textbf{mitigação adaptativa} (monitor eBPF e controlador).
+\end{itemize}
+
+Opcionalmente, um sexto modo usará o escalonador \textit{sched\_ext}
+(\textit{scx\_lavd}), incluído somente se o kernel e o escalonador
+funcionarem na máquina de coleta.
+
+Os níveis de contenção serão proporcionais ao número de processadores
+lógicos $N$ (no piloto, os níveis fixos não escalaram com a máquina):
+
+\begin{itemize}
+    \item $0$ processos (\textit{baseline});
+    \item $N/2$ processos;
+    \item $N$ processos;
+    \item $2N$ processos.
+\end{itemize}
+
+Com $N=12$, isso corresponde a 0, 6, 12 e 24 processos. Assim, serão
+avaliadas:
+
+\[
+5 \times 4 = 20
+\]
+
+configurações experimentais (24 se o modo \textit{sched\_ext} for incluído).
+
+\subsection{Variáveis}
+
+\begin{table}[H]
+\centering
+\caption{Variáveis do experimento.}
+\label{tab:variaveis}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Tipo} & \textbf{Variáveis} \\
+\midrule
+Independentes & modo de mitigação (5 níveis); nível de contenção (0, $N/2$, $N$, $2N$) \\
+Dependentes & latência média, P95 e P99; \textit{rebuffering}; vazão; espera na fila de
+execução (eBPF/\texttt{schedstat}); custo da carga concorrente (\textit{bogo ops/s} do
+\textit{stress-ng}); uso de CPU; trocas de contexto; PSI; tempo de reação do controlador \\
+Controladas & conteúdo e tamanho dos segmentos; taxa de requisições; número de
+espectadores; duração; governador de CPU; máquina e kernel; notebook na tomada \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \subsection{Workloads}
 
-O workload principal é a solicitação contínua e sequencial de segmentos de vídeo pelo cliente sintético ao servidor de streaming, simulando a reprodução de um stream em tempo real. O workload de contenção é gerado pelo \texttt{stress-ng}, configurado para saturar um número definido de núcleos de CPU, simulando processos concorrentes disputando recursos no mesmo host.
+O workload principal será formado por requisições de um cliente aos
+segmentos de vídeo disponibilizados pelo Nginx (20 segmentos de 400~KB,
+conexões persistentes).
+
+A contenção será gerada pelo \textit{stress-ng}, utilizando os níveis
+definidos na Seção~\ref{sec:fatores}. O mesmo conteúdo de vídeo e as mesmas
+condições de requisição serão mantidos entre as execuções. A ordem das
+execuções será sorteada (com semente registrada), com aquecimento e
+resfriamento entre elas.
 
 \subsection{Métricas}
 
-As métricas coletadas incluem: throughput (segmentos ou Mbps efetivamente entregues por segundo); latência de resposta por segmento solicitado; latência de resposta nos percentis 95 e 99 (p95/p99); taxa de \emph{rebuffering} (proporção de segmentos que não chegam a tempo de manter a reprodução contínua); uso de CPU do processo do servidor; número de trocas de contexto (\emph{context switches}) sofridas pelo processo; e o PSI (\emph{Pressure Stall Information}) de CPU observado durante o teste.
+Serão utilizadas as seguintes métricas:
 
-\subsection{Ferramentas de medição}
+\begin{itemize}
+    \item latência, P95 e P99 por requisição;
+    \item \textit{throughput};
+    \item \textit{rebuffering} (fração de segmentos acima do limite);
+    \item espera do Nginx na fila de execução;
+    \item custo para a carga concorrente (\textit{bogo ops/s});
+    \item utilização da CPU e trocas de contexto involuntárias;
+    \item pressão de CPU (PSI);
+    \item número de ações e tempo de reação do controlador.
+\end{itemize}
 
-Serão utilizados: \texttt{ab} (Apache Bench) ou \texttt{wrk} para geração de requisições HTTP e coleta de throughput/latência; um script próprio em Python para o cliente sintético de streaming e para o cálculo da taxa de rebuffering; \texttt{stress-ng} para geração de carga concorrente de CPU; \texttt{taskset} para configuração de CPU affinity; \emph{cgroups} v2 para limitação/garantia de CPU; \texttt{nice}/\texttt{chrt} para ajuste de prioridade; \texttt{perf stat} para contagem de \emph{context switches}; leitura de \texttt{/proc/pressure/cpu} para PSI; e scripts próprios em Bash/Python para orquestração dos testes e consolidação dos dados coletados em arquivos CSV.
+\subsection{Ferramentas de Medição}
 
-\subsection{Repetições}
+O cliente em Python será responsável pela coleta das métricas de entrega dos
+segmentos e do \textit{rebuffering}, gravando as amostras por requisição. O
+\textit{bpftrace} e o \texttt{schedstat} medirão a espera na fila de execução,
+e o PSI e o \texttt{/proc} complementarão o diagnóstico. O \textit{wrk} poderá
+ser usado para medir a vazão máxima do servidor.
 
-Cada combinação de modo de isolamento e nível de contenção (4 modos $\times$ 4 níveis = 16 configurações) será executada 5 vezes, com um período de \emph{cooldown} entre repetições, permitindo o cálculo de média e desvio padrão para cada configuração e reduzindo o efeito de variações momentâneas do sistema.
+O monitor eBPF pode adicionar sobrecarga. Por isso, serão feitas execuções
+oficiais sem o monitor e execuções instrumentadas, e a diferença será
+reportada.
 
-\subsection{Procedimento experimental}
+\subsection{Estudo Piloto e Ajustes}
 
-O procedimento experimental segue as seguintes etapas: (1) preparação do servidor de streaming (com os segmentos de vídeo disponíveis) e validação do cliente sintético e do script de medição de \emph{rebuffering}; (2) para cada modo de isolamento, e para cada nível de contenção, iniciar o servidor com a configuração de isolamento correspondente; (3) iniciar os processos de carga concorrente no nível definido; (4) aguardar um breve período de estabilização (\emph{warm-up}); (5) iniciar o cliente sintético e coletar as métricas durante um período fixo de execução (por exemplo, 60 segundos); (6) repetir os passos (3)–(5) por 5 vezes para a mesma configuração; (7) encerrar os processos e aguardar \emph{cooldown} antes da próxima configuração; e (8) repetir o processo para todas as combinações de modo de isolamento e nível de contenção, consolidando ao final todos os dados coletados em uma planilha única para posterior análise estatística.
+O piloto (3 repetições, 20 espectadores, 12 processadores lógicos) mostrou
+que o efeito da contenção só apareceu com 8 processos de estresse, que a
+vazão é ditada pelo cliente (cerca de 98 req/s), que o \textit{baseline} com
+$n=0$ chegou a ser pior que com $n=2$ e que o coeficiente de variação do P99
+teve mediana 0,25 e máximo 0,55. A Tabela~\ref{tab:ajustes} resume os
+ajustes adotados.
+
+\begin{table}[H]
+\centering
+\caption{Problemas observados no piloto e ajustes.}
+\label{tab:ajustes}
+\begin{tabularx}{\textwidth}{XX}
+\toprule
+\textbf{Observação} & \textbf{Ajuste} \\
+\midrule
+Efeito visível só com 8 processos & Níveis proporcionais a $N$ (0, $N/2$, $N$, $2N$) \\
+Alta variabilidade do P99 & 10 repetições e execuções de 30~s \\
+$n=0$ pior que $n=2$ & Aquecimento, resfriamento e ordem sorteada \\
+Vazão limitada pelo cliente & Vazão tratada como indicador secundário; \textit{wrk} opcional \\
+Mecanismo não explicado & Medir espera na fila (eBPF/\texttt{schedstat}) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Quantidade de Repetições}
+
+Cada configuração será executada dez vezes, com duração de 30 segundos por
+execução. Como existem 20 configurações:
+
+\[
+20 \times 10 = 200
+\]
+
+execuções, o que dá cerca de duas horas de coleta, sem contar o
+aquecimento e o resfriamento.
+
+\subsection{Análise Estatística}
+
+Para cada configuração serão reportadas a mediana e o intervalo
+interquartil, com intervalo de confiança de 95\% por \textit{bootstrap}.
+Os modos serão comparados ao cenário sem isolamento com o teste de
+Mann--Whitney, e o tamanho do efeito será reportado junto ao valor-$p$. A
+relação entre a espera na fila e o P99 será avaliada por correlação.
+
+\subsection{Procedimento Experimental}
+
+O experimento seguirá as seguintes etapas:
+
+\begin{enumerate}
+    \item Preparar a máquina física com Linux, registrar suas características e fixar o governador em \textit{performance}.
+    \item Configurar o Nginx e os segmentos de vídeo.
+    \item Sortear a ordem das configurações experimentais.
+    \item Aplicar o mecanismo de isolamento ou prioridade correspondente.
+    \item Iniciar o \textit{stress-ng} com o nível de contenção definido.
+    \item Iniciar o monitor eBPF e, no modo adaptativo, o controlador.
+    \item Executar o cliente de streaming.
+    \item Coletar as métricas definidas e armazenar os resultados sem sobrescrever execuções anteriores.
+    \item Restaurar os limites, encerrar o controlador e esperar antes da próxima execução.
+    \item Repetir o procedimento dez vezes para cada configuração.
+\end{enumerate}
+
+Durante os experimentos, serão mantidos o mesmo conteúdo e as mesmas
+condições de execução, buscando tornar as comparações entre os cenários mais
+consistentes.
 
 \end{document}
