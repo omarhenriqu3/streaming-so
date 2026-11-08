@@ -1,0 +1,27 @@
+{
+  "semente": 20261016,
+  "ncpu": 2,
+  "args": {
+    "rodada": 1,
+    "repeticoes": 3,
+    "duracao": 8.0,
+    "warmup": 2.0,
+    "cooldown": 2.0,
+    "espectadores": 50,
+    "intervalo": 0.2,
+    "semente": 20261016,
+    "modos": [
+      "sem_isolamento",
+      "affinity",
+      "cgroup",
+      "prioridade"
+    ],
+    "niveis": [
+      0,
+      2,
+      4,
+      8
+    ]
+  },
+  "kernel": "6.18.44-fc-v139"
+}

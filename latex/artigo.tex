@@ -1,0 +1,78 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage{geometry}
+\usepackage{indentfirst}
+\usepackage{hyperref}
+\geometry{margin=2.5cm}
+
+\title{Streaming sob Contenção de Recursos: Impacto de Mecanismos de Escalonamento e Isolamento de CPU no Desempenho de um Servidor de Streaming de Vídeo}
+\author{Omar Henrique Macedo Alves \and Davi Patricio}
+\date{Outubro de 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Introdução}
+
+O streaming de vídeo é hoje a principal forma de distribuição de conteúdo audiovisual pela internet, baseando-se tipicamente na entrega de pequenos segmentos de vídeo via HTTP (como nos esquemas HLS e DASH), que o cliente solicita e reproduz em sequência. A qualidade percebida pelo usuário depende diretamente da capacidade do servidor de entregar esses segmentos com vazão (\emph{throughput}) suficiente e latência baixa e estável: uma entrega lenta ou irregular provoca \emph{rebuffering} — a interrupção da reprodução enquanto o cliente espera por dados —, um dos eventos mais prejudiciais à experiência do usuário em serviços de streaming.
+
+Para reduzir custos de infraestrutura, provedores de streaming frequentemente consolidam múltiplos clientes e serviços em um mesmo servidor físico, o que gera disputa por recursos computacionais — especialmente CPU — entre os processos concorrentes. Essa disputa é mediada pelo sistema operacional, que decide a cada instante qual processo recebe tempo de execução em qual núcleo. O escalonador padrão do Linux (CFS — \emph{Completely Fair Scheduler}) busca distribuir o tempo de CPU de forma equilibrada entre os processos, mas essa equidade pode ser prejudicial justamente para um processo crítico de latência, como o servidor de streaming: um atraso momentâneo na geração ou no envio de um segmento de vídeo é percebido pelo cliente como uma queda de qualidade ou um engasgo na reprodução. Mecanismos do sistema operacional como afinidade de CPU (\emph{CPU affinity}), \emph{cgroups}, prioridades de processo e isolamento de núcleos podem, em princípio, proteger esse processo crítico da contenção gerada por outros processos, mas o quanto cada mecanismo efetivamente reduz essa degradação é uma questão empírica.
+
+Este trabalho tem como objetivo investigar, de forma experimental, o impacto de mecanismos de isolamento de CPU do sistema operacional Linux sobre o desempenho de um servidor de streaming de vídeo, quando esse servidor está sujeito a diferentes níveis de contenção de recursos causada por processos concorrentes. A questão de pesquisa que orienta o estudo é: \emph{qual é o impacto de mecanismos de isolamento de CPU (afinidade de CPU, cgroups e prioridades de processo) sobre o desempenho (throughput, latência de resposta e taxa de rebuffering) de um servidor de streaming de vídeo, quando esse servidor está sujeito a contenção de recursos causada por processos concorrentes?} A hipótese adotada é a de que, sem qualquer isolamento, o aumento da contenção degrada progressivamente o desempenho do servidor de streaming, e que a aplicação de mecanismos de isolamento — em especial a combinação de CPU affinity, cgroups e prioridade elevada — atenua significativamente essa degradação.
+
+O restante deste documento está organizado da seguinte forma: a Seção~\ref{sec:fundamentacao} apresenta a fundamentação teórica sobre escalonamento de processos, isolamento de CPU e as particularidades de desempenho de servidores de streaming; a Seção~\ref{sec:metodologia} descreve a metodologia experimental utilizada para investigar a questão de pesquisa proposta.
+
+\section{Fundamentação Teórica}
+\label{sec:fundamentacao}
+
+\subsection{Escalonamento de processos no Linux}
+
+O escalonador de processos é o componente do sistema operacional responsável por decidir qual processo, dentre todos os prontos para execução, recebe a CPU em cada instante. O escalonador padrão das distribuições Linux modernas é o CFS (\emph{Completely Fair Scheduler}), que busca aproximar o tempo de CPU recebido por cada processo ao que ele receberia em um sistema idealmente justo, no qual todos os processos prontos compartilham a CPU simultaneamente e de forma equitativa. Esse critério de equidade é adequado para a maioria das cargas de trabalho de propósito geral, mas não garante, por si só, baixa latência para um processo específico quando o número de processos concorrentes aumenta: quanto mais processos disputando a mesma CPU, maior tende a ser o intervalo entre duas execuções consecutivas de um processo qualquer, incluindo um processo sensível a latência como um servidor de streaming que precisa responder prontamente a cada requisição de segmento de vídeo.
+
+\subsection{Mecanismos de isolamento e priorização de CPU}
+
+O Linux oferece diversos mecanismos que permitem modificar o comportamento padrão do escalonador para processos específicos. A \emph{afinidade de CPU} (CPU affinity) permite restringir um processo a executar apenas em um subconjunto definido de núcleos, reduzindo a migração entre núcleos e, quando combinada com o isolamento desses núcleos para outros processos (via \emph{isolcpus} ou \emph{cpuset}), pode garantir acesso quase exclusivo a um núcleo físico. Os \emph{cgroups} (\emph{control groups}) permitem agrupar processos e aplicar limites ou garantias de recursos — como uma quantidade mínima garantida de tempo de CPU (via \texttt{cpu.weight}) ou um teto máximo de uso (via \texttt{cpu.max}) — ao grupo como um todo. As \emph{prioridades de processo}, ajustáveis por meio do valor de \emph{nice} ou, de forma mais agressiva, por políticas de escalonamento de tempo real (via \texttt{chrt}), alteram a probabilidade de um processo ser escolhido para execução em relação aos demais. Cada um desses mecanismos atua em um nível diferente — alocação espacial (em qual núcleo um processo roda), alocação temporal (quanto tempo de CPU um processo recebe) e prioridade relativa (quão cedo um processo é escolhido) — e podem ser combinados para proteger processos críticos de latência, como um servidor de streaming, da contenção causada por processos concorrentes.
+
+\subsection{Desempenho em servidores de streaming de vídeo}
+
+Em servidores de streaming, o desempenho percebido pelo cliente depende de dois aspectos complementares: a vazão sustentada de entrega de dados (\emph{throughput}), necessária para acompanhar a taxa de bits do vídeo sem acumular atraso, e a regularidade/latência de resposta a cada requisição de segmento, cuja variação é crítica para evitar \emph{rebuffering} — a interrupção perceptível da reprodução enquanto o cliente espera por dados. As métricas usuais para caracterizar esse desempenho incluem o throughput efetivo, a latência de resposta por segmento solicitado, métricas de latência de cauda como os percentis 95 e 99 (p95/p99) — que capturam os piores casos de atraso, frequentemente mais relevantes para a experiência do usuário do que a média —, e a própria taxa de rebuffering observada pelo cliente. Esses indicadores estão diretamente relacionados a métricas internas do sistema operacional, como o número de trocas de contexto (\emph{context switches}) sofridas pelo processo do servidor e o PSI (\emph{Pressure Stall Information}) de CPU, que quantifica o tempo em que processos ficaram impedidos de executar por falta de CPU disponível. A relação entre esses mecanismos e indicadores de sistema operacional e o desempenho observável de um servidor de streaming, sob diferentes níveis de contenção por recursos, é o problema central investigado neste trabalho.
+
+\section{Metodologia Experimental}
+\label{sec:metodologia}
+
+\subsection{Arquitetura do ambiente experimental}
+
+O ambiente experimental é inteiramente executado dentro de uma máquina virtual Ubuntu Linux, acessada via SSH a partir do host físico. Dentro da VM executam-se três componentes: (i) o servidor de streaming, servindo segmentos de vídeo via HTTP (em um esquema semelhante a HLS/DASH); (ii) um cliente sintético, que solicita continuamente segmentos de vídeo ao servidor, simulando a reprodução de um stream em tempo real; e (iii) processos de carga concorrente, gerados com a ferramenta \texttt{stress-ng}, que disputam CPU com o processo do servidor. Um script de controle é responsável por aplicar (ou não) os mecanismos de isolamento de CPU ao processo do servidor, iniciar os processos de carga no nível de contenção desejado, executar o teste por um período fixo e coletar as métricas de desempenho ao final de cada execução.
+
+\subsection{Hardware e software}
+
+A VM convidada (Ubuntu Server) é configurada com ao menos duas vCPUs e entre 1 e 2~GB de RAM — recursos modestos, uma vez que o experimento não depende de múltiplas VMs simultâneas. O host físico possui um processador com 6 núcleos e 12 \emph{threads}, 8~GB de RAM e aproximadamente 239~GB de armazenamento, executando o hipervisor Oracle VirtualBox. O servidor de streaming é implementado com Nginx (servindo segmentos de vídeo pré-gerados) ou um servidor HTTP próprio; o cliente sintético é implementado em Python; a geração de carga concorrente utiliza o \texttt{stress-ng}; os mecanismos de isolamento são aplicados via \texttt{taskset} (CPU affinity), \emph{cgroups} v2 (\texttt{cpu.max}/\texttt{cpu.weight}) e \texttt{nice}/\texttt{chrt} (prioridades).
+
+\subsection{Fatores e configurações comparadas}
+
+O fator experimental principal é o modo de isolamento aplicado ao processo do servidor de streaming, com quatro níveis: (a) sem isolamento (configuração padrão do escalonador); (b) CPU affinity, com o processo restrito a um núcleo dedicado; (c) \emph{cgroups}, com garantia mínima de tempo de CPU para o processo; e (d) prioridade elevada, via \texttt{nice}/\texttt{chrt}. O fator secundário é a intensidade da contenção, definida como o número de processos concorrentes de carga gerados pelo \texttt{stress-ng}, variando em quatro níveis: 0, 2, 4 e 8 processos. O cliente sintético mantém sempre a mesma taxa de solicitação de segmentos em todas as configurações, de modo a isolar o efeito do isolamento de CPU e da contenção sobre o desempenho do servidor.
+
+\subsection{Workloads}
+
+O workload principal é a solicitação contínua e sequencial de segmentos de vídeo pelo cliente sintético ao servidor de streaming, simulando a reprodução de um stream em tempo real. O workload de contenção é gerado pelo \texttt{stress-ng}, configurado para saturar um número definido de núcleos de CPU, simulando processos concorrentes disputando recursos no mesmo host.
+
+\subsection{Métricas}
+
+As métricas coletadas incluem: throughput (segmentos ou Mbps efetivamente entregues por segundo); latência de resposta por segmento solicitado; latência de resposta nos percentis 95 e 99 (p95/p99); taxa de \emph{rebuffering} (proporção de segmentos que não chegam a tempo de manter a reprodução contínua); uso de CPU do processo do servidor; número de trocas de contexto (\emph{context switches}) sofridas pelo processo; e o PSI (\emph{Pressure Stall Information}) de CPU observado durante o teste.
+
+\subsection{Ferramentas de medição}
+
+Serão utilizados: \texttt{ab} (Apache Bench) ou \texttt{wrk} para geração de requisições HTTP e coleta de throughput/latência; um script próprio em Python para o cliente sintético de streaming e para o cálculo da taxa de rebuffering; \texttt{stress-ng} para geração de carga concorrente de CPU; \texttt{taskset} para configuração de CPU affinity; \emph{cgroups} v2 para limitação/garantia de CPU; \texttt{nice}/\texttt{chrt} para ajuste de prioridade; \texttt{perf stat} para contagem de \emph{context switches}; leitura de \texttt{/proc/pressure/cpu} para PSI; e scripts próprios em Bash/Python para orquestração dos testes e consolidação dos dados coletados em arquivos CSV.
+
+\subsection{Repetições}
+
+Cada combinação de modo de isolamento e nível de contenção (4 modos $\times$ 4 níveis = 16 configurações) será executada 5 vezes, com um período de \emph{cooldown} entre repetições, permitindo o cálculo de média e desvio padrão para cada configuração e reduzindo o efeito de variações momentâneas do sistema.
+
+\subsection{Procedimento experimental}
+
+O procedimento experimental segue as seguintes etapas: (1) preparação do servidor de streaming (com os segmentos de vídeo disponíveis) e validação do cliente sintético e do script de medição de \emph{rebuffering}; (2) para cada modo de isolamento, e para cada nível de contenção, iniciar o servidor com a configuração de isolamento correspondente; (3) iniciar os processos de carga concorrente no nível definido; (4) aguardar um breve período de estabilização (\emph{warm-up}); (5) iniciar o cliente sintético e coletar as métricas durante um período fixo de execução (por exemplo, 60 segundos); (6) repetir os passos (3)–(5) por 5 vezes para a mesma configuração; (7) encerrar os processos e aguardar \emph{cooldown} antes da próxima configuração; e (8) repetir o processo para todas as combinações de modo de isolamento e nível de contenção, consolidando ao final todos os dados coletados em uma planilha única para posterior análise estatística.
+
+\end{document}

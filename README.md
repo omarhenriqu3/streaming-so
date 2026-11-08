@@ -83,10 +83,12 @@ flowchart LR
 | Nginx | Servidor de streaming |
 | stress-ng | Geração de contenção de CPU |
 | taskset / sched_setaffinity | Afinidade de CPU |
-| cgroups v2 | Limitação/garantia de CPU |
+| cgroups v2 (v1 no piloto) | Limitação/garantia de CPU; o orquestrador detecta a versão |
 | nice / chrt | Prioridade de processos |
-| ab / wrk | Requisições HTTP e métricas de throughput/latência |
-| perf stat | Context switches e métricas do processo |
+| Cliente Python (`workloads/cliente_streaming.py`) | Requisições HTTP, latência e rebuffering (usado no piloto) |
+| ab / wrk | Previstos para a coleta definitiva (throughput máximo, cliente em C) |
+| /proc/PID/status | Context switches do worker do Nginx (usado no piloto) |
+| perf stat | Previsto para a VM; não funcionou no container do piloto |
 | /proc/pressure/cpu | PSI de CPU |
 | Python / Bash | Cliente, orquestração e coleta |
 | Pandas / SciPy / Matplotlib | Análise e visualização |
@@ -147,12 +149,12 @@ A métrica central é a degradação provocada pela contenção e o quanto cada 
 
 | Métrica | Definição | Coleta |
 |---|---|---|
-| Throughput | Segmentos ou Mbps entregues por segundo | `ab` / `wrk` |
-| Latência | Tempo entre requisição e recebimento do segmento | `ab` / `wrk` / cliente |
-| P95 / P99 | Percentis de cauda da latência | `ab` / `wrk` |
+| Throughput | Segmentos ou Mbps entregues por segundo | Cliente Python (`ab` / `wrk` na definitiva) |
+| Latência | Tempo entre requisição e recebimento do segmento | Cliente Python |
+| P95 / P99 | Percentis de cauda da latência | Cliente Python |
 | Rebuffering | Segmentos que não chegam a tempo de manter a reprodução | Cliente Python |
-| Uso de CPU | CPU utilizada pelo Nginx | `perf stat` / cgroups |
-| Context switches | Trocas de contexto | `perf stat` |
+| Uso de CPU | CPU utilizada pelo Nginx | `/proc/PID/stat` (cgroups / `perf stat` na VM) |
+| Context switches | Trocas de contexto | `/proc/PID/status` (`perf stat` na VM) |
 | PSI de CPU | Pressão causada pela indisponibilidade de CPU | `/proc/pressure/cpu` |
 
 Para as métricas numéricas serão consideradas, quando aplicável: média, mediana, desvio padrão, p95 e p99.
@@ -177,13 +179,13 @@ Para as métricas numéricas serão consideradas, quando aplicável: média, med
 
 | Item | Quantidade |
 |---|---:|
-| Piloto | 5 execuções por configuração |
+| Piloto | 3 execuções por configuração (48 execuções; ver `docs/relatorio_piloto.md`) |
 | Coleta definitiva | 5 execuções por configuração |
 | Configurações | 16 |
 | Execuções definitivas | **80** |
 | Duração de cada execução | Ex.: 60 segundos |
 
-Entre execuções será utilizado um período de **cooldown** para encerrar processos e reduzir interferências entre amostras.
+As execuções são feitas em ordem sorteada (e não em blocos de 5 repetições por configuração). Entre execuções será utilizado um período de **cooldown** para encerrar processos e reduzir interferências entre amostras.
 
 ---
 
@@ -232,39 +234,31 @@ flowchart TD
 
 # Registro dos resultados
 
-Os resultados brutos serão armazenados em `resultados/brutos/`.
-
-Cada execução deve gerar um arquivo próprio, evitando sobrescrever resultados anteriores.
-
-Exemplo:
+Os resultados brutos ficam em `resultados/brutos/`. Cada **rodada** gera um CSV novo (uma linha por execução), nunca sobrescrito, com um `_meta.json` (semente, argumentos, kernel) e a latência de cada requisição em `amostras/`. A ordem das execuções é sorteada (semente registrada) para que o horário não se confunda com o efeito dos fatores.
 
 ```text
 resultados/brutos/
-├── C01_rep01_2026-10-05.csv
-├── C01_rep02_2026-10-05.csv
-├── C02_rep01_2026-10-05.csv
-└── ...
+├── rodada1_2026-10-16.csv
+├── rodada1_2026-10-16_meta.json
+└── amostras/
+    └── <run_id>.csv.gz
 ```
 
-Colunas previstas:
+Colunas do CSV:
 
 | Coluna | Conteúdo |
 |---|---|
-| experimento | Identificação do experimento |
-| configuração | C01–C16 |
-| isolamento | Modo utilizado |
-| contenção | Número de processos |
-| repetição | Número da repetição |
-| timestamp | Data/hora |
-| throughput | Vazão medida |
-| latência | Latência observada |
-| p95 | Percentil 95 |
-| p99 | Percentil 99 |
-| rebuffering | Taxa observada |
-| cpu | Uso de CPU |
-| context_switches | Trocas de contexto |
-| psi_cpu | Pressão de CPU |
-| descartada | Se a amostra foi descartada |
+| rodada, run_id, ordem | Identificação e posição no sorteio |
+| modo, nivel_contencao, rep | Configuração (C01–C16 = modo × nível) e repetição |
+| inicio_iso, duracao_s | Data/hora e duração da medição |
+| n_req, n_falhas | Requisições feitas e falhas |
+| thr_req_s, thr_MBps | Throughput |
+| lat_media_ms, lat_mediana_ms, lat_p95_ms, lat_p99_ms, lat_max_ms | Latência |
+| reb_20ms, reb_50ms, reb_100ms | Fração de segmentos acima do limiar (proxy de rebuffering) |
+| cpu_servidor_pct, cpu_host_pct, loadavg1 | Uso de CPU |
+| ctx_vol, ctx_invol | Context switches do servidor |
+| psi_some_us_por_s | PSI de CPU |
+| descartada, obs | Se a execução foi descartada e por quê |
 
 ---
 
@@ -288,29 +282,38 @@ As principais medidas de mitigação são manter o conteúdo, a configuração d
 ```text
 .
 ├── README.md
+├── executar_piloto.sh          # roda o piloto de ponta a ponta
 ├── docs/
-│   └── ambiente.md
+│   ├── ambiente.md
+│   └── relatorio_piloto.md     # resultados e problemas do piloto
 ├── orquestrador/
-│   └── README.md
+│   ├── README.md
+│   └── run_experimento.py
 ├── workloads/
-│   └── README.md
+│   ├── README.md
+│   ├── cliente_streaming.py
+│   └── gerar_segmentos.sh
 ├── configs/
-│   └── README.md
+│   ├── README.md
+│   └── nginx.conf.tpl
 ├── resultados/
-│   └── brutos/
-│       └── .gitkeep
+│   ├── README.md
+│   └── brutos/                 # CSVs, _meta.json e amostras/
 ├── analise/
-│   └── README.md
+│   ├── README.md
+│   ├── analisar.py
+│   └── saida/                  # resumo e gráficos
 └── latex/
-    └── README.md
+    ├── README.md
+    └── artigo.tex
 ```
 
 | Pasta | Conteúdo |
 |---|---|
-| `docs/` | Registro do ambiente e informações da execução |
-| `orquestrador/` | Scripts que automatizam os experimentos |
-| `workloads/` | Nginx, segmentos e cliente sintético |
-| `configs/` | Configurações dos mecanismos de isolamento |
+| `docs/` | Registro do ambiente e relatório do piloto |
+| `orquestrador/` | Script que automatiza os experimentos |
+| `workloads/` | Cliente sintético e gerador de segmentos |
+| `configs/` | Modelo de configuração do Nginx |
 | `resultados/` | Dados brutos coletados |
 | `analise/` | Estatística e gráficos |
 | `latex/` | Documentação final do projeto |
@@ -322,3 +325,12 @@ As principais medidas de mitigação são manter o conteúdo, a configuração d
 - Documentação do Linux sobre cgroups v2: https://docs.kernel.org/admin-guide/cgroup-v2.html
 - Documentação do Linux sobre PSI: https://docs.kernel.org/accounting/psi.html
 - stress-ng: https://github.com/ColinIanKing/stress-ng
+
+
+## Mitigação adaptativa (modo `adaptativo`)
+
+5º modo do orquestrador: `orquestrador/controlador.py` mede a espera do worker do Nginx na fila de execução
+(`/proc/PID/schedstat`) a cada 200 ms e, se ela passar do limiar por 2 janelas seguidas, aperta o teto de CPU
+(`cpu.max`/`cpu.shares`) do grupo do `stress-ng` e aumenta o peso do servidor; relaxa quando a espera cai.
+`workloads/fila_cpu.bt` mede a mesma espera com eBPF (bpftrace; opcional, `--ebpf`).
+Calibração dos limiares: `--ctl-observar` + `analise/resumo_controlador.py`. Níveis padrão: 0, N/2, N, 2N.

@@ -1,0 +1,33 @@
+#!/usr/bin/env bpftrace
+// Espera de UMA tarefa (o worker do Nginx) na fila de execução, em janelas de 200 ms.
+// Uso:  sudo bpftrace workloads/fila_cpu.bt <PID_DO_WORKER> | tee fila_cpu.csv
+// Saída (CSV): t_ms,espera_total_ns,n_escalonamentos,espera_max_ns
+// A espera = tempo entre a tarefa ficar pronta (sched_wakeup) e ganhar a CPU (sched_switch).
+BEGIN { printf("t_ms,espera_total_ns,n,espera_max_ns\n"); }
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+/args->pid == $1/
+{ @pronto = nsecs; }
+
+tracepoint:sched:sched_switch
+/args->prev_pid == $1 && args->prev_state == 0/
+{ @pronto = nsecs; }   // preemptada: voltou para a fila
+
+tracepoint:sched:sched_switch
+/args->next_pid == $1 && @pronto != 0/
+{
+  $d = nsecs - @pronto;
+  @soma = @soma + $d;
+  @n = @n + 1;
+  if ($d > @maximo) { @maximo = $d; }
+  @pronto = 0;
+}
+
+interval:ms:200
+{
+  printf("%llu,%llu,%llu,%llu\n", nsecs / 1000000, @soma, @n, @maximo);
+  @soma = 0; @n = 0; @maximo = 0;
+}
+
+END { clear(@pronto); clear(@soma); clear(@n); clear(@maximo); }
