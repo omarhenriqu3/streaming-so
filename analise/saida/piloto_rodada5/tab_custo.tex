@@ -1,0 +1,17 @@
+\begin{table}[H]
+\centering
+\small
+\caption{CPU obtida pela carga do stress-ng (CPUs): mediana [IC 95\%].}
+\label{tab:custo}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Modo} & \textbf{0 proc.} & \textbf{6 proc.} & \textbf{12 proc.} & \textbf{24 proc.} \\
+\midrule
+Sem isolamento & 0.0 [0.0; 0.0] & 6.0 [5.9; 6.0] & 10.2 [10.2; 10.8] & 10.2 [10.0; 10.3] \\
+Afinidade (taskset) & 0.0 [0.0; 0.0] & 6.0 [6.0; 6.0] & 10.1 [9.5; 10.4] & 10.0 [9.7; 10.3] \\
+cgroups (peso) & 0.0 [0.0; 0.0] & 6.0 [6.0; 6.0] & 10.2 [9.9; 10.3] & 10.8 [10.0; 10.9] \\
+Prioridade (nice) & 0.0 [0.0; 0.0] & 6.0 [6.0; 6.0] & 10.6 [10.5; 10.8] & 10.9 [10.8; 11.0] \\
+Adaptativo (eBPF) & 0.0 [0.0; 0.0] & 6.0 [6.0; 6.0] & 4.0 [3.9; 10.3] & 2.7 [2.2; 4.1] \\
+\bottomrule
+\end{tabular}
+\end{table}

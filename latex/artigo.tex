@@ -17,6 +17,8 @@
 \usepackage{hyperref}
 \usepackage{amsmath}
 \usepackage{tikz}
+\usepackage{url}
+\usepackage{caption}
 
 \usetikzlibrary{positioning,arrows.meta}
 
@@ -92,164 +94,139 @@ João Pessoa -- PB
 \end{center}
 \end{titlepage}
 
-% =========================================================
-% SUMÁRIO
-% =========================================================
+
+
+\begin{abstract}
+\noindent
+Servidores de streaming de vídeo são sensíveis à disputa por CPU, pois atrasos na entrega de segmentos
+elevam a latência de cauda e podem causar \textit{rebuffering}. Este trabalho avalia, em Linux nativo,
+como a contenção de CPU gerada pelo \textit{stress-ng} afeta um servidor Nginx e compara cinco modos de
+mitigação: nenhum isolamento, afinidade de CPU, cgroups v2 (pesos), prioridade (\textit{nice}) e uma
+mitigação adaptativa proposta, na qual um controlador mede a espera do Nginx na fila de execução do
+escalonador (via \texttt{schedstat} e eBPF) e ajusta limites de CPU em laço fechado. O planejamento
+prevê 5 modos, 4 níveis de contenção proporcionais ao número de CPUs lógicas e 10 repetições por
+configuração, com mediana, intervalos de confiança por \textit{bootstrap} e teste de Mann--Whitney com
+correção de Holm. Os resultados apresentados aqui são do \textbf{estudo piloto} (3 repetições, 12 CPUs
+lógicas): a espera do Nginx na fila cresce cerca de 200 vezes (de 0,6 para 123~ms/s) entre o
+\textit{baseline} e a contenção máxima, e todos os mecanismos a reduzem (de 5 a 15 vezes); porém,
+o P99 não acompanhou essa espera (correlação de Spearman $\rho=-0{,}03$), e a mitigação adaptativa
+protegeu o servidor ao custo de reduzir a CPU da carga concorrente de cerca de 10 para 2,7 CPUs, ao
+contrário do isolamento por pesos. Com 3 repetições nenhum teste pode ser significativo; a coleta
+definitiva fará essa verificação.
+\end{abstract}
+
+\newpage
 \tableofcontents
 \newpage
 
 % =========================================================
-% 1. INTRODUÇÃO
-% =========================================================
 \section{Introdução}
 
-O streaming de vídeo é uma aplicação que depende da capacidade do sistema
-computacional de atender requisições de forma eficiente e contínua. Nesse
-contexto, a disputa por recursos, principalmente pela CPU, pode afetar o
-desempenho do servidor e a entrega dos conteúdos ao cliente.
+O streaming de vídeo depende da capacidade do servidor de atender requisições de forma contínua. Quando
+a CPU é disputada por outros processos, o servidor passa mais tempo esperando para executar, o que
+aumenta a latência de cada resposta e, principalmente, a latência de cauda (P95/P99), que é a que
+interrompe a reprodução.
 
-Este projeto tem como objetivo analisar o impacto da contenção de CPU sobre
-um servidor de streaming, comparar mecanismos de isolamento e priorização
-disponíveis no Linux e propor uma \textbf{mitigação adaptativa}: um
-controlador que detecta a contenção a partir de sinais do escalonador,
-coletados com eBPF, e ajusta automaticamente os limites de CPU para proteger
-o servidor.
+Este projeto analisa o impacto da contenção de CPU sobre um servidor de streaming, compara mecanismos de
+isolamento e priorização do Linux e propõe uma \textbf{mitigação adaptativa}: um controlador que detecta a
+contenção a partir de um sinal do escalonador, coletado com eBPF, e ajusta automaticamente os limites de CPU.
+O experimento é realizado em máquina física com Linux nativo, sem máquina virtual. O Nginx serve segmentos de
+vídeo, o \textit{stress-ng} gera a contenção e o projeto segue três etapas: \textit{baseline}, perturbação e
+mitigação.
 
-O experimento será realizado diretamente em uma máquina física com Linux
-instalado, sem a utilização de máquina virtual. O Nginx será utilizado como
-servidor para disponibilizar segmentos de vídeo, enquanto o
-\textit{stress-ng} será utilizado para gerar diferentes níveis de carga
-sobre a CPU. O projeto segue três etapas: \textit{baseline} (sem
-perturbação), perturbação (contenção de CPU) e mitigação (mecanismos estáticos
-e adaptativo).
-
-\subsection{Questões de Pesquisa}
-
+\subsection{Questões de pesquisa}
 \begin{description}
-    \item[RQ1] Como diferentes níveis de contenção de CPU afetam a latência
-    (P95/P99) e o rebuffering de um servidor de streaming?
-    \item[RQ2] Os mecanismos estáticos de isolamento (afinidade, cgroups e
-    prioridade) reduzem esse impacto?
-    \item[RQ3] A espera do Nginx na fila de execução, medida com eBPF,
-    explica o aumento da latência?
-    \item[RQ4] Uma mitigação adaptativa, guiada por essa espera, reduz a
-    latência com menor custo para a carga concorrente do que o isolamento
-    estático?
+    \item[RQ1] Como diferentes níveis de contenção de CPU afetam a latência (P95/P99) e o rebuffering de um
+    servidor de streaming?
+    \item[RQ2] Os mecanismos estáticos de isolamento (afinidade, cgroups e prioridade) reduzem esse impacto?
+    \item[RQ3] A espera do Nginx na fila de execução, medida com eBPF, explica o aumento da latência?
+    \item[RQ4] Uma mitigação adaptativa reduz a latência com menor custo para a carga concorrente do que o
+    isolamento estático?
 \end{description}
 
 \subsection{Hipóteses}
-
 \begin{description}
-    \item[H1] A latência P99 e o rebuffering aumentam com o nível de contenção.
-    \item[H2] Ao menos um mecanismo estático reduz o P99 em relação ao cenário
-    sem isolamento sob contenção alta.
-    \item[H3] A espera na fila de execução cresce com a contenção e acompanha
-    o aumento do P99.
-    \item[H4] A mitigação adaptativa reduz o P99 em relação ao cenário sem
-    isolamento, penalizando menos a carga concorrente que um limite fixo.
+    \item[H1] O P99 e o rebuffering aumentam com o nível de contenção.
+    \item[H2] Ao menos um mecanismo estático reduz o P99 em relação ao cenário sem isolamento sob contenção alta.
+    \item[H3] A espera na fila de execução cresce com a contenção e acompanha o P99.
+    \item[H4] A mitigação adaptativa reduz o P99 em relação ao cenário sem isolamento, penalizando menos a
+    carga concorrente do que um limite fixo.
 \end{description}
 
-Um resultado negativo também é válido: ele pode indicar que o gargalo não era
-a CPU, que o sinal escolhido não representa o problema ou que a política
-precisa ser ajustada.
+\subsection{Contribuições}
+(i) Um ambiente reprodutível e automatizado (orquestrador, cliente sintético, análise); (ii) a medição da
+espera do Nginx na fila de execução por duas vias independentes (\texttt{schedstat} e eBPF); (iii) um
+controlador adaptativo de código aberto; e (iv) uma avaliação que expõe quando a espera na fila é, ou não, um
+bom indicador de latência de cauda.
 
-% =========================================================
-% 2. FUNDAMENTAÇÃO TEÓRICA
 % =========================================================
 \section{Fundamentação Teórica}
 
-\subsection{Streaming de Vídeo}
+\subsection{Streaming de vídeo}
+O conteúdo é dividido em segmentos solicitados por HTTP. Atrasos na entrega comprometem a continuidade da
+reprodução. O cliente usado aqui é sintético: não reproduz vídeo real (HLS/DASH); requisita segmentos de
+400~KB e usa como proxy de \textit{rebuffering} a fração de segmentos entregues acima de um limite de tempo.
 
-O streaming de vídeo consiste na disponibilização de conteúdo audiovisual
-pela rede, permitindo que o cliente receba os dados de forma progressiva.
-Neste projeto, o conteúdo será dividido em segmentos que serão solicitados
-pelo cliente ao servidor por meio de requisições HTTP.
+\subsection{Contenção de CPU e fila de execução}
+Cada CPU lógica mantém uma fila de execução (\textit{run queue}). Quando há mais tarefas prontas que CPUs, uma
+tarefa espera antes de executar e pode ser preemptada. A cadeia de efeitos esperada é: contenção $\rightarrow$
+espera na fila $\rightarrow$ aumento da latência por requisição $\rightarrow$ aumento do P99 $\rightarrow$
+rebuffering. O escalonador padrão do kernel utilizado (7.0) é baseado no EEVDF
+\cite{stoica1995eevdf}, que prioriza tarefas com menor tempo de espera acumulado, o que favorece tarefas
+curtas e que dormem com frequência, como um servidor ocioso entre requisições.
 
-Atrasos na entrega dos segmentos podem afetar a continuidade da reprodução,
-tornando o desempenho do servidor um fator importante para a aplicação. O
-cliente usado é sintético: ele não reproduz vídeo real (HLS/DASH), mas
-requisita segmentos de 400~KB e usa como proxy de \textit{rebuffering} a
-fração de segmentos entregues acima de um limite de tempo.
+\subsection{Isolamento e priorização no Linux}
+A afinidade de CPU (\texttt{taskset}, \texttt{sched\_setaffinity}) restringe em quais CPUs um processo executa.
+Os cgroups v2 \cite{cgroupv2} controlam o uso proporcional (\texttt{cpu.weight}, válido quando há disputa) e
+limitam o uso absoluto (\texttt{cpu.max}). A prioridade (\textit{nice}) altera o peso do processo no
+escalonador. Nenhum desses mecanismos é adaptativo: seus parâmetros são fixos durante a execução.
 
-\subsection{Contenção de CPU e Fila de Execução}
+\subsection{eBPF e observabilidade do escalonador}
+O eBPF executa programas verificados no kernel, associados a eventos como os do escalonador, sem alterar o
+kernel \cite{gregg2019bpf}. A espera de uma tarefa na fila pode ser medida pelo intervalo entre o
+\textit{wakeup} e o momento em que ela ganha a CPU, ou lida do contador acumulado \texttt{run\_delay} em
+\texttt{/proc/PID/schedstat}. Um programa de \textit{tracing} apenas observa: a ação é feita por um
+controlador em espaço de usuário. O \textit{sched\_ext} \cite{schedext} permite escrever o próprio escalonador
+em eBPF; está disponível no kernel utilizado, mas não é avaliado neste trabalho. Complementarmente, o PSI
+\cite{psi} informa a pressão de CPU do sistema.
 
-A contenção de CPU ocorre quando diferentes processos competem
-simultaneamente pelo processamento disponível. Cada CPU lógica mantém uma
-fila de execução (\textit{run queue}); quando há mais tarefas prontas do que
-CPUs, uma tarefa passa a esperar na fila antes de executar e pode ser
-preemptada por outras (troca de contexto involuntária).
-
-Para um servidor de streaming, a cadeia de efeitos é: contenção $\rightarrow$
-espera na fila de execução $\rightarrow$ aumento da latência de cada
-requisição $\rightarrow$ aumento da cauda de latência (P95/P99) $\rightarrow$
-rebuffering. Neste projeto, a contenção será produzida de forma controlada
-utilizando o \textit{stress-ng}.
-
-\subsection{Isolamento e Priorização no Linux}
-
-O Linux disponibiliza mecanismos que permitem controlar a execução dos
-processos e sua utilização dos recursos computacionais.
-
-Entre os mecanismos utilizados neste projeto estão a afinidade de CPU, por
-meio do \textit{taskset} (\texttt{sched\_setaffinity}), os cgroups v2 e
-mecanismos de prioridade de processos, como \textit{nice/chrt}. Nos cgroups v2
-destacam-se \texttt{cpu.weight}, que define a fração proporcional de CPU
-quando há disputa, e \texttt{cpu.max}, que impõe um teto de CPU ao grupo.
-
-Esses mecanismos serão comparados para verificar seus efeitos sobre o
-desempenho do servidor durante situações de contenção.
-
-\subsection{eBPF e Observabilidade do Escalonador}
-
-O eBPF permite executar pequenos programas verificados dentro do kernel,
-associados a eventos como os do escalonador, sem alterar o código do kernel.
-Com ele é possível medir o tempo que o Nginx espera na fila de execução, por
-meio de \textit{bpftrace} ou da ferramenta \textit{runqlat}. Como
-alternativas e fontes complementares, serão usados o contador
-\texttt{run\_delay} em \texttt{/proc/PID/schedstat} (exige
-\texttt{kernel.sched\_schedstats=1}), as trocas de contexto em
-\texttt{/proc/PID/status} e a pressão de CPU (PSI) em
-\texttt{/proc/pressure/cpu}.
-
-Um programa de \textit{tracing} apenas observa: ele não altera prioridades.
-Por isso, a ação é executada por um controlador em espaço de usuário. O
-\textit{sched\_ext}, disponível no kernel utilizado (ver
-Seção~\ref{sec:ambiente}), permite que o próprio escalonador seja escrito em
-eBPF; ele será avaliado como modo opcional (Seção~\ref{sec:fatores}).
-
-\subsection{Mitigação Adaptativa}
-
-A mitigação adaptativa é um laço fechado: medir a espera do Nginx na fila
-$\rightarrow$ detectar contenção $\rightarrow$ decidir por limiar $\rightarrow$
-ajustar \texttt{cpu.weight} e/ou \texttt{cpu.max} do grupo que gera a carga
-$\rightarrow$ medir novamente. O controlador observa a espera em janelas
-periódicas e só age quando o limiar é excedido por janelas consecutivas;
-as ações são graduais e reversíveis, com histerese para relaxar os limites
-quando a contenção cessa. Os parâmetros iniciais (período de cerca de 200~ms,
-degraus de \texttt{cpu.weight}, tetos de \texttt{cpu.max} como 50\% e 25\%)
-são valores a calibrar com dados reais, não valores universais.
-
-Por segurança, o controlador inicia em modo observação (apenas registra a
-decisão), atua somente sobre processos do experimento, respeita limites
-mínimo e máximo, tem intervalo mínimo entre ações e restaura os valores
-originais ao final.
+\subsection{Mitigação adaptativa}
+É um laço fechado: medir a espera do Nginx $\rightarrow$ detectar contenção $\rightarrow$ decidir por limiar
+$\rightarrow$ ajustar \texttt{cpu.weight} e \texttt{cpu.max} do grupo que gera a carga $\rightarrow$ medir de
+novo. O controlador amostra a espera a cada 200~ms, sobe um degrau quando o sinal excede o limiar alto por 2
+janelas seguidas e relaxa um degrau quando fica abaixo do limiar baixo por 10 janelas (histerese). Os degraus
+têm duas fases: no degrau 1 só os pesos mudam (Nginx 400 e carga 10, equivalente ao isolamento estático por
+pesos); nos degraus 2 a 4 acrescenta-se um teto de CPU para a carga (50\%, 25\% e 10\% das CPUs). Assim, a ação
+mais barata para a carga vem primeiro. No piloto descrito na Seção~\ref{sec:resultados}, porém, o primeiro
+degrau já incluía o teto de 50\%; a versão em duas fases foi implementada depois dele. Atua apenas sobre os grupos do experimento e restaura os valores ao final.
 
 % =========================================================
-% 3. METODOLOGIA EXPERIMENTAL
+\section{Trabalhos Relacionados}
+
+A importância da latência de cauda em serviços interativos é discutida por Dean e Barroso
+\cite{dean2013tail}, que mostram como pequenas variações em componentes se amplificam em sistemas
+distribuídos. Lozi \textit{et al.} \cite{lozi2016wasted} mostram que o escalonador do Linux pode deixar CPUs
+ociosas enquanto há tarefas esperando, o que torna a espera na fila um sinal relevante de desempenho.
+
+Sobre contenção entre cargas colocalizadas, Liu \textit{et al.} \cite{liu2021gap} observam que contêineres
+colocalizados podem sofrer lentidão de até $5\times$ por causa da diferença entre a CPU reservada e a CPU
+efetivamente obtida, que atribuem ao caráter conservador de trabalho do escalonador CFS, e propõem o rKube para
+corrigi-la. Jeffery \textit{et al.} \cite{jeffery2024tail} atribuem latências de cauda elevadas ao
+excesso de \textit{threads} de aplicações que ignoram sua cota de CPU e propõem um \textit{threadpool} que
+ajusta seus trabalhadores à cota disponível. Ferramentas de observabilidade com eBPF para medir a latência de
+fila do escalonador estão descritas por Gregg \cite{gregg2019bpf}.
+
+Este trabalho difere dos anteriores em três pontos: compara, sob a mesma carga e na mesma máquina, mecanismos
+estáticos do Linux com uma mitigação adaptativa; usa a espera do próprio servidor na fila, medida por duas
+vias, como sinal de controle; e relata o custo da mitigação para a carga concorrente, além do ganho de latência.
+
 % =========================================================
 \section{Metodologia Experimental}
 
-\subsection{Arquitetura do Ambiente Experimental}
-
-O experimento será realizado diretamente em uma máquina física com Linux
-instalado, sem utilização do VirtualBox ou de máquina virtual. As configurações
-do sistema operacional e do hardware serão registradas antes dos testes.
-
-O orquestrador será responsável por configurar os cenários, iniciar as
-cargas, o monitor eBPF e o controlador, executar o cliente e coletar os
-resultados.
-
-A arquitetura do ambiente é apresentada na Figura~\ref{fig:arquitetura}.
+\subsection{Arquitetura do ambiente}
+O experimento roda em máquina física com Linux nativo. O orquestrador configura cada cenário, inicia o
+\textit{stress-ng}, o monitor eBPF e o controlador, executa o cliente e coleta os resultados
+(Figura~\ref{fig:arquitetura}).
 
 \begin{figure}[H]
     \centering
@@ -313,88 +290,40 @@ A arquitetura do ambiente é apresentada na Figura~\ref{fig:arquitetura}.
     \label{fig:arquitetura}
 \end{figure}
 
-\subsection{Hardware e Software}
-\label{sec:ambiente}
 
-O experimento será executado diretamente em uma máquina física com Linux
-instalado. As características do hardware, a distribuição Linux e a versão
-do kernel serão registradas antes da realização dos experimentos.
 
+\subsection{Hardware e software}
 \begin{table}[H]
 \centering
-\caption{Hardware e configuração do ambiente experimental.}
+\caption{Ambiente experimental.}
 \label{tab:hardware}
 \begin{tabular}{ll}
 \toprule
 \textbf{Componente} & \textbf{Especificação} \\
 \midrule
-Processador & AMD Ryzen 5 5500U \\
-Núcleos / threads & 6 núcleos / 12 threads \\
+Processador & AMD Ryzen 5 5500U, 6 núcleos / 12 threads \\
+Processadores lógicos ($N$) & 12 \\
 Memória RAM & 8 GB \\
-Processadores lógicos disponíveis ($N$) & 12 \\
-Versão do kernel & 7.0.0-43-generic \\
-Suporte a \textit{sched\_ext} & Sim (\texttt{/sys/kernel/sched\_ext}) \\
-Armazenamento disponível & A registrar \\
-Sistema operacional & Distribuição Linux a registrar \\
-Ambiente de execução & Máquina física (Linux nativo) \\
+Kernel & 7.0.0-43-generic (Ubuntu, distribuição \textit{resolute}) \\
+Suporte a \textit{sched\_ext} & Sim \\
+Ambiente & Máquina física, Linux nativo \\
 \bottomrule
 \end{tabular}
 \end{table}
+Softwares: Nginx (1 \textit{worker}, \texttt{sendfile} desligado), Python (cliente, orquestrador e
+controlador), \textit{stress-ng}, \textit{bpftrace}, \textit{taskset}, cgroups, \textit{nice} e
+\texttt{/proc} (PSI, \texttt{schedstat}, trocas de contexto).
 
-Os principais softwares utilizados serão:
-
-\begin{itemize}
-    \item Nginx: servidor HTTP (1 \textit{worker});
-    \item Python: cliente de streaming, orquestrador e controlador;
-    \item \textit{stress-ng}: geração de carga de CPU;
-    \item \textit{bpftrace} (e \textit{runqlat}): espera na fila de execução;
-    \item \textit{taskset}: afinidade de CPU;
-    \item cgroups v2: controle de recursos (\texttt{cpu.weight}, \texttt{cpu.max});
-    \item \textit{nice/chrt}: prioridade de processos;
-    \item PSI e \texttt{/proc}: pressão de CPU, trocas de contexto e \texttt{schedstat};
-    \item \textit{wrk} (opcional): vazão máxima do servidor;
-    \item \textit{cpupower}: governador de CPU em \textit{performance};
-    \item \textit{scx\_lavd} (opcional): escalonador \textit{sched\_ext}.
-\end{itemize}
-
-\subsection{Fatores e Configurações Comparadas}
-\label{sec:fatores}
-
-Serão comparados cinco modos:
-
-\begin{itemize}
-    \item sem isolamento;
-    \item afinidade de CPU;
-    \item cgroups v2 (limites estáticos);
-    \item prioridade de processos;
-    \item \textbf{mitigação adaptativa} (monitor eBPF e controlador).
-\end{itemize}
-
-Opcionalmente, um sexto modo usará o escalonador \textit{sched\_ext}
-(\textit{scx\_lavd}), incluído somente se o kernel e o escalonador
-funcionarem na máquina de coleta.
-
-Os níveis de contenção serão proporcionais ao número de processadores
-lógicos $N$ (no piloto, os níveis fixos não escalaram com a máquina):
-
-\begin{itemize}
-    \item $0$ processos (\textit{baseline});
-    \item $N/2$ processos;
-    \item $N$ processos;
-    \item $2N$ processos.
-\end{itemize}
-
-Com $N=12$, isso corresponde a 0, 6, 12 e 24 processos. Assim, serão
-avaliadas:
-
-\[
-5 \times 4 = 20
-\]
-
-configurações experimentais (24 se o modo \textit{sched\_ext} for incluído).
+\subsection{Fatores e configurações}
+Cinco modos: sem isolamento; afinidade (Nginx na CPU 0 e a carga nas demais); cgroups v2 por pesos (4096 para
+o servidor e 128 para a carga, via \texttt{cpu.shares}/\texttt{cpu.weight}); prioridade (\textit{nice} $-15$
+para o Nginx); e adaptativo. Quatro níveis de contenção proporcionais ao número $K$ de CPUs disponíveis ao experimento: 0, $K/2$, $K$ e $2K$
+processos do \textit{stress-ng}. São $5\times4=20$ configurações. No piloto, $K=N=12$ (0, 6, 12 e 24 processos).
+Como a contenção quase não afetou o P99 com 12 CPUs livres, a coleta definitiva \textbf{confina} Nginx, cliente e
+\textit{stress-ng} às CPUs 0 a 3 ($K=4$; níveis 0, 2, 4 e 8), mantendo o orquestrador e o monitor nas demais, e
+fixa o governador de frequência em \textit{performance} (restaurado ao final).
 
 \subsection{Variáveis}
-
 \begin{table}[H]
 \centering
 \caption{Variáveis do experimento.}
@@ -403,120 +332,165 @@ configurações experimentais (24 se o modo \textit{sched\_ext} for incluído).
 \toprule
 \textbf{Tipo} & \textbf{Variáveis} \\
 \midrule
-Independentes & modo de mitigação (5 níveis); nível de contenção (0, $N/2$, $N$, $2N$) \\
-Dependentes & latência média, P95 e P99; \textit{rebuffering}; vazão; espera na fila de
-execução (eBPF/\texttt{schedstat}); custo da carga concorrente (\textit{bogo ops/s} do
-\textit{stress-ng}); uso de CPU; trocas de contexto; PSI; tempo de reação do controlador \\
-Controladas & conteúdo e tamanho dos segmentos; taxa de requisições; número de
-espectadores; duração; governador de CPU; máquina e kernel; notebook na tomada \\
+Independentes & modo (5 níveis); nível de contenção (0, $N/2$, $N$, $2N$) \\
+Dependentes & P95 e P99 da latência; \textit{rebuffering}; vazão; espera do Nginx na fila (ms por segundo);
+CPU obtida pela carga (CPUs); trocas de contexto; PSI; tempo de reação do controlador \\
+Controladas & conteúdo (20 segmentos de 400~KB); 20 espectadores a cerca de 5 req/s cada; duração; máquina e
+kernel; governador de CPU; CPUs do experimento ($K$); notebook na tomada \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\subsection{Workloads}
+\subsection{Carga, métricas e procedimento}
+O cliente mantém conexões persistentes e registra a latência de cada requisição; o P95 e o P99 são calculados
+por execução. A espera na fila é o incremento de \texttt{run\_delay} do \textit{worker} do Nginx dividido pela
+duração (ms por segundo). O custo da carga é o tempo de CPU consumido pelo grupo do \textit{stress-ng} dividido
+pela duração (em número de CPUs). A ordem das execuções é sorteada com semente registrada; há aquecimento de
+2~s antes da medição e esfriamento entre execuções, e nenhuma rodada sobrescreve outra. O monitor eBPF
+(\texttt{fila\_cpu.bt}) foi validado em uma execução e concordou com o \texttt{schedstat}
+(19,2 contra 18,8~ms/s).
 
-O workload principal será formado por requisições de um cliente aos
-segmentos de vídeo disponibilizados pelo Nginx (20 segmentos de 400~KB,
-conexões persistentes).
+\subsection{Plano estatístico}
+A unidade de análise é a execução ($n$ = repetições por configuração). Para cada métrica reportam-se a
+mediana, o intervalo interquartil e o IC de 95\% da mediana por \textit{bootstrap} percentil
+\cite{efron1993bootstrap} (10\,000 reamostragens). Cada modo é comparado ao \textit{baseline} sem isolamento no
+mesmo nível pelo teste de Mann--Whitney \cite{mann1947} bilateral, com tamanho de efeito pelo $\delta$ de Cliff
+\cite{cliff1993} e correção de Holm \cite{holm1979} por família (métrica $\times$ nível). A relação entre
+espera e P99 é avaliada pela correlação de Spearman. Com $n=3$ vs.\ $3$, o menor $p$ possível do teste é
+$0{,}1$; por isso o piloto não permite afirmar significância, e a coleta definitiva usa 10 repetições de 30~s
+(200 execuções).
 
-A contenção será gerada pelo \textit{stress-ng}, utilizando os níveis
-definidos na Seção~\ref{sec:fatores}. O mesmo conteúdo de vídeo e as mesmas
-condições de requisição serão mantidos entre as execuções. A ordem das
-execuções será sorteada (com semente registrada), com aquecimento e
-resfriamento entre elas.
+% =========================================================
+\section{Resultados}\label{sec:resultados}
 
-\subsection{Métricas}
+\noindent\textbf{Nota:} os resultados abaixo são do \textbf{estudo piloto} (rodada 5: 60 execuções, 3 repetições
+de 8~s por configuração, 20 espectadores, 12 CPUs lógicas). Eles devem ser substituídos pelos da coleta
+definitiva (10 repetições de 30~s) reexecutando \texttt{analise/estatistica.py}.
 
-Serão utilizadas as seguintes métricas:
+\subsection{Contenção e espera na fila (RQ1 e RQ3)}
+Sem isolamento, a espera mediana do Nginx na fila foi de 0,6~ms/s sem estresse, 4,4 (6 processos), 41 (12) e
+123~ms/s (24), crescimento de cerca de 200 vezes (Tabela~\ref{tab:espera}, Figura~\ref{fig:espera}). A
+vazão caiu de 98,3 para 93,2~req/s.
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.85\textwidth]{figuras/fig_espera_vs_contencao.png}
+\caption{Espera do Nginx na fila de execução por nível de contenção (mediana e IC 95\%, escala logarítmica).}
+\label{fig:espera}
+\end{figure}
+\input{figuras/tab_espera.tex}
+
+O P99, entretanto, não acompanhou essa espera (Tabela~\ref{tab:p99}, Figura~\ref{fig:p99}): sem isolamento foi
+16,4~ms sem estresse, 10,7, 5,7 e 13,7~ms nos níveis 6, 12 e 24. A correlação de Spearman entre espera e P99
+nas 60 execuções foi $\rho=-0{,}03$ (IC 95\% $[-0{,}32;\,0{,}25]$, $p=0{,}81$). O \textit{rebuffering} (segmentos
+acima de 20~ms) foi praticamente nulo em todas as configurações e, por isso, não discrimina os modos.
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.85\textwidth]{figuras/fig_p99_vs_contencao.png}
+\caption{P99 da latência por nível de contenção e modo (mediana e IC 95\% do bootstrap, $n=3$).}
+\label{fig:p99}
+\end{figure}
+\input{figuras/tab_p99.tex}
+
+\subsection{Mecanismos estáticos (RQ2)}
+Com 24 processos, todos os mecanismos reduziram a espera de 123 para 8--24~ms/s (cgroups 8,4; adaptativo 11,9;
+prioridade 12,8; afinidade 24,2). O P99 mediano foi menor que o do \textit{baseline} (13,7~ms) em todos:
+cgroups 3,7; afinidade 6,6; prioridade 6,8; adaptativo 7,0~ms. Com $n=3$, nenhuma dessas diferenças é
+significativa após a correção de Holm ($p_{\text{Holm}}=0{,}4$, $|\delta|$ de Cliff entre 0,56 e 1,0). O
+\textit{baseline} sem estresse teve P99 acima do de 6 processos em quase todos os modos, comportamento já
+observado nos pilotos anteriores.
+
+\subsection{Mitigação adaptativa e custo para a carga (RQ4)}
+O controlador não agiu com 0 e 6 processos. Com 12 e 24, atuou em média 2 a 3 vezes e reagiu em 0,4 a 0,6~s
+após o início do tráfego (mediana 0,61~s; Figura~\ref{fig:timeline}). A espera caiu de 123 para 12~ms/s no
+nível 24. O custo foi alto para a carga: ela obteve 2,7 CPUs, contra 10,2 sem isolamento e 10,8 com cgroups
+por pesos (Tabela~\ref{tab:custo}, Figura~\ref{fig:custo}). Ou seja, o isolamento por pesos protegeu o Nginx
+tão bem quanto o adaptativo, sem reduzir a CPU da carga.
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.85\textwidth]{figuras/fig_timeline_controlador.png}
+\caption{Execução com 24 processos: espera do Nginx e degrau do controlador. O tráfego começa em 2~s, após o
+aquecimento.}
+\label{fig:timeline}
+\end{figure}
+\input{figuras/tab_custo.tex}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.8\textwidth]{figuras/fig_custo_vs_p99.png}
+\caption{Proteção do Nginx (P99) contra a CPU obtida pela carga, com 24 processos.}
+\label{fig:custo}
+\end{figure}
+
+% =========================================================
+\section{Discussão}
+
+\textbf{RQ1/H1.} A contenção aumentou claramente a espera do Nginx (cerca de 200$\times$), mas o P99 e o
+\textit{rebuffering} não cresceram de forma monótona no piloto; H1 não foi confirmada para o P99. \textbf{RQ3/H3.}
+A primeira metade de H3 (a espera cresce com a contenção) foi confirmada; a segunda (acompanha o P99) não, dado
+$\rho\approx0$. Hipóteses não testadas para isso: (i) o EEVDF favorece o Nginx, que dorme entre requisições, de
+modo que cada espera é curta (alguns milissegundos por segundo) em relação ao P99; (ii) com 12 CPUs há capacidade
+ociosa que absorve o servidor de uma só \textit{thread}; (iii) o cliente Python, na mesma máquina, também
+disputa CPU e contribui para a latência medida; (iv) o P99 sem estresse mais alto sugere efeito de estados de
+baixa frequência da CPU. Por isso a coleta definitiva confina Nginx, cliente e carga a 4 CPUs e fixa o governador de
+CPU em \textit{performance}, o que testa as hipóteses (ii) e (iv).
+
+\textbf{RQ2/H2.} Todos os mecanismos reduziram a espera e o P99 numericamente, mas a significância depende dos
+dados definitivos. \textbf{RQ4/H4.} O adaptativo reduziu a espera e o P99, mas pelo corte de \textit{cpu.max}
+na carga; no piloto, não custou menos que o isolamento por pesos, portanto H4 não foi sustentada. Como o primeiro
+degrau do controlador do piloto já aplicava um teto de 50\%, o controlador foi reestruturado em duas fases (peso
+primeiro, teto depois), o que o aproxima do \textit{cgroup} estático e deve reduzir o custo para a carga; isso será
+avaliado na coleta definitiva.
+
+\textbf{Reação.} O controlador reagiu em cerca de 0,5~s após o tráfego começar, o que é adequado a execuções de
+30~s mas lento para picos curtos.
+
+% =========================================================
+\section{Ameaças à Validação}
 
 \begin{itemize}
-    \item latência, P95 e P99 por requisição;
-    \item \textit{throughput};
-    \item \textit{rebuffering} (fração de segmentos acima do limite);
-    \item espera do Nginx na fila de execução;
-    \item custo para a carga concorrente (\textit{bogo ops/s});
-    \item utilização da CPU e trocas de contexto involuntárias;
-    \item pressão de CPU (PSI);
-    \item número de ações e tempo de reação do controlador.
+    \item \textbf{Poucas repetições no piloto.} Com $n=3$ nenhum teste pode ser significativo; os resultados são
+    indícios.
+    \item \textbf{Cliente sintético na mesma máquina.} Não reproduz um player real, e o cliente disputa CPU com o
+    servidor e a carga.
+    \item \textbf{Uma única máquina e kernel.} Os níveis em que o efeito aparece dependem do hardware e do
+    escalonador (EEVDF).
+    \item \textbf{Limiar do controlador.} Os valores padrão (0,02 e 0,005) vieram de um \textit{container} de 2 CPUs
+    e não foram recalibrados para a máquina de 12 CPUs.
+    \item \textbf{Proxy de \textit{rebuffering}.} O limite de 20~ms quase nunca foi excedido; limites menores
+    podem ser recalculados a partir das amostras por requisição.
+    \item \textbf{Sobrecarga do eBPF} não foi medida; o \texttt{schedstat} é o sinal do controlador.
+    \item \textbf{Carga sintética.} O \textit{stress-ng} é puramente de CPU e não representa uma aplicação real.
+    \item \textbf{Variação entre rodadas.} Rodadas executadas com parâmetros diferentes (por exemplo, o
+    intervalo entre requisições) não são comparáveis.
 \end{itemize}
 
-\subsection{Ferramentas de Medição}
+% =========================================================
+\section{Conclusões}
 
-O cliente em Python será responsável pela coleta das métricas de entrega dos
-segmentos e do \textit{rebuffering}, gravando as amostras por requisição. O
-\textit{bpftrace} e o \texttt{schedstat} medirão a espera na fila de execução,
-e o PSI e o \texttt{/proc} complementarão o diagnóstico. O \textit{wrk} poderá
-ser usado para medir a vazão máxima do servidor.
+No piloto, a contenção de CPU aumentou cerca de 200 vezes a espera do Nginx na fila de execução, e essa espera
+pôde ser medida por duas vias concordantes (\texttt{schedstat} e eBPF). Os quatro mecanismos a reduziram de 5 a 15
+vezes, mas a latência P99 não acompanhou a espera, e a mitigação adaptativa, apesar de reagir em cerca de
+0,5~s, protegeu o servidor cortando a CPU da carga, enquanto o isolamento por pesos o fez sem esse custo. As
+respostas às questões de pesquisa são, portanto, preliminares: RQ1 e RQ3 parcialmente confirmadas, RQ2 numérica
+mas sem significância, RQ4 não sustentada.
 
-O monitor eBPF pode adicionar sobrecarga. Por isso, serão feitas execuções
-oficiais sem o monitor e execuções instrumentadas, e a diferença será
-reportada.
+Trabalhos seguintes: a coleta definitiva (10 repetições de 30~s) com análise estatística completa; a
+recalibração dos limiares; a avaliação do confinamento a 4 CPUs e do controlador em duas fases; a medição da sobrecarga do eBPF; e a avaliação de um escalonador \textit{sched\_ext}.
 
-\subsection{Estudo Piloto e Ajustes}
-
-O piloto (3 repetições, 20 espectadores, 12 processadores lógicos) mostrou
-que o efeito da contenção só apareceu com 8 processos de estresse, que a
-vazão é ditada pelo cliente (cerca de 98 req/s), que o \textit{baseline} com
-$n=0$ chegou a ser pior que com $n=2$ e que o coeficiente de variação do P99
-teve mediana 0,25 e máximo 0,55. A Tabela~\ref{tab:ajustes} resume os
-ajustes adotados.
-
-\begin{table}[H]
-\centering
-\caption{Problemas observados no piloto e ajustes.}
-\label{tab:ajustes}
-\begin{tabularx}{\textwidth}{XX}
-\toprule
-\textbf{Observação} & \textbf{Ajuste} \\
-\midrule
-Efeito visível só com 8 processos & Níveis proporcionais a $N$ (0, $N/2$, $N$, $2N$) \\
-Alta variabilidade do P99 & 10 repetições e execuções de 30~s \\
-$n=0$ pior que $n=2$ & Aquecimento, resfriamento e ordem sorteada \\
-Vazão limitada pelo cliente & Vazão tratada como indicador secundário; \textit{wrk} opcional \\
-Mecanismo não explicado & Medir espera na fila (eBPF/\texttt{schedstat}) \\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-\subsection{Quantidade de Repetições}
-
-Cada configuração será executada dez vezes, com duração de 30 segundos por
-execução. Como existem 20 configurações:
-
-\[
-20 \times 10 = 200
-\]
-
-execuções, o que dá cerca de duas horas de coleta, sem contar o
-aquecimento e o resfriamento.
-
-\subsection{Análise Estatística}
-
-Para cada configuração serão reportadas a mediana e o intervalo
-interquartil, com intervalo de confiança de 95\% por \textit{bootstrap}.
-Os modos serão comparados ao cenário sem isolamento com o teste de
-Mann--Whitney, e o tamanho do efeito será reportado junto ao valor-$p$. A
-relação entre a espera na fila e o P99 será avaliada por correlação.
-
-\subsection{Procedimento Experimental}
-
-O experimento seguirá as seguintes etapas:
-
-\begin{enumerate}
-    \item Preparar a máquina física com Linux, registrar suas características e fixar o governador em \textit{performance}.
-    \item Configurar o Nginx e os segmentos de vídeo.
-    \item Sortear a ordem das configurações experimentais.
-    \item Aplicar o mecanismo de isolamento ou prioridade correspondente.
-    \item Iniciar o \textit{stress-ng} com o nível de contenção definido.
-    \item Iniciar o monitor eBPF e, no modo adaptativo, o controlador.
-    \item Executar o cliente de streaming.
-    \item Coletar as métricas definidas e armazenar os resultados sem sobrescrever execuções anteriores.
-    \item Restaurar os limites, encerrar o controlador e esperar antes da próxima execução.
-    \item Repetir o procedimento dez vezes para cada configuração.
-\end{enumerate}
-
-Durante os experimentos, serão mantidos o mesmo conteúdo e as mesmas
-condições de execução, buscando tornar as comparações entre os cenários mais
-consistentes.
+% =========================================================
+\begin{thebibliography}{99}
+\bibitem{dean2013tail} Dean, J.; Barroso, L. A. The Tail at Scale. \textit{Communications of the ACM}, v. 56, n. 2, p. 74--80, 2013.
+\bibitem{lozi2016wasted} Lozi, J.-P.; Lepers, B.; Funston, J.; Gaud, F.; Quéma, V.; Fedorova, A. The Linux Scheduler: a Decade of Wasted Cores. In: \textit{EuroSys}, 2016.
+\bibitem{liu2021gap} Liu, L.; Wang, H.; Wang, A.; Xiao, M.; Cheng, Y.; Chen, S. Mind the Gap: Broken Promises of CPU Reservations in Containerized Multi-tenant Clouds. In: \textit{ACM Symposium on Cloud Computing (SoCC)}, 2021.
+\bibitem{jeffery2024tail} Jeffery, A.; Jensen, C.; Mortier, R. Reducing Tail Latencies Through Environment- and Neighbour-aware Thread Management. arXiv:2407.11582, 2024.
+\bibitem{gregg2019bpf} Gregg, B. \textit{BPF Performance Tools}. Addison-Wesley, 2019.
+\bibitem{stoica1995eevdf} Stoica, I.; Abdel-Wahab, H. Earliest Eligible Virtual Deadline First: A Flexible and Accurate Mechanism for Proportional Share Resource Allocation. Technical Report TR-95-22, Old Dominion University, 1995.
+\bibitem{cgroupv2} Linux Kernel Documentation. Control Group v2. \url{https://docs.kernel.org/admin-guide/cgroup-v2.html}.
+\bibitem{psi} Linux Kernel Documentation. PSI -- Pressure Stall Information. \url{https://docs.kernel.org/accounting/psi.html}.
+\bibitem{schedext} Linux Kernel Documentation. Extensible Scheduler Class (sched\_ext). \url{https://docs.kernel.org/scheduler/sched-ext.html}.
+\bibitem{efron1993bootstrap} Efron, B.; Tibshirani, R. J. \textit{An Introduction to the Bootstrap}. Chapman \& Hall, 1993.
+\bibitem{mann1947} Mann, H. B.; Whitney, D. R. On a Test of Whether One of Two Random Variables is Stochastically Larger than the Other. \textit{Annals of Mathematical Statistics}, v. 18, n. 1, p. 50--60, 1947.
+\bibitem{cliff1993} Cliff, N. Dominance Statistics: Ordinal Analyses to Answer Ordinal Questions. \textit{Psychological Bulletin}, v. 114, n. 3, p. 494--509, 1993.
+\bibitem{holm1979} Holm, S. A Simple Sequentially Rejective Multiple Test Procedure. \textit{Scandinavian Journal of Statistics}, v. 6, n. 2, p. 65--70, 1979.
+\end{thebibliography}
 
 \end{document}

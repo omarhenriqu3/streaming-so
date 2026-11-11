@@ -13,6 +13,7 @@ Uso (como root, pois usa cgroups, nice negativo e sched_setaffinity):
     sudo python3 orquestrador/run_experimento.py --rodada 1 --repeticoes 3 --duracao 8
 """
 import argparse
+import atexit
 import csv
 import datetime as dt
 import gzip
@@ -210,8 +211,40 @@ def parar_stress(p):
 
 
 # ---------------------------------------------------------------- uma execução
+def governador(novo=None):
+    """Lê (e, se `novo`, ajusta) o governador de frequência de todas as CPUs. Retorna {arquivo: valor anterior}."""
+    ant = {}
+    for f in pathlib.Path("/sys/devices/system/cpu").glob("cpu[0-9]*/cpufreq/scaling_governor"):
+        try:
+            ant[str(f)] = f.read_text().strip()
+            if novo:
+                f.write_text(novo)
+        except OSError:
+            pass
+    return ant
+
+
+def restaurar_governador(ant):
+    for f, v in ant.items():
+        try:
+            pathlib.Path(f).write_text(v)
+        except OSError:
+            pass
+
+
 def executar(modo, nivel, args, cg, ncpu, run_id):
     pre_srv = pre_carga = None
+    base = set(range(ncpu)) if args.cpus else None   # confinamento: Nginx, cliente e carga só nas CPUs 0..K-1
+
+    def com_base(f):
+        if base is None:
+            return f
+
+        def g():
+            os.sched_setaffinity(0, base)
+            if f:
+                f()
+        return g
     if modo == "affinity" and ncpu > 1:
         outros = set(range(1, ncpu))
         pre_srv = lambda: os.sched_setaffinity(0, {0})
@@ -227,6 +260,7 @@ def executar(modo, nivel, args, cg, ncpu, run_id):
         cg.criar("so_carga", 1024, 100)
         pre_srv, pre_carga = cg.entrar("so_servidor"), cg.entrar("so_carga")
 
+    pre_srv, pre_carga = com_base(pre_srv), com_base(pre_carga)
     stress = ctl = ebpf = None
     try:
         iniciar_nginx(pre_srv)
@@ -256,7 +290,8 @@ def executar(modo, nivel, args, cg, ncpu, run_id):
         subprocess.run([sys.executable, "-I", str(RAIZ / "workloads/cliente_streaming.py"),
                         "--porta", str(PORTA), "--espectadores", str(args.espectadores),
                         "--intervalo", str(args.intervalo), "--duracao", str(args.duracao),
-                        "--saida", str(saida)], check=True, timeout=args.duracao + 30)
+                        "--saida", str(saida)], check=True, timeout=args.duracao + 30,
+                       preexec_fn=com_base(None))
 
         w1 = time.perf_counter()
         v1, i1 = ctx(worker)
@@ -318,24 +353,35 @@ def main():
     ap.add_argument("--warmup", type=float, default=2.0)
     ap.add_argument("--cooldown", type=float, default=2.0)
     ap.add_argument("--espectadores", type=int, default=30)
-    ap.add_argument("--intervalo", type=float, default=0.25)
+    ap.add_argument("--intervalo", type=float, default=0.2)
     ap.add_argument("--semente", type=int, default=None)
     ap.add_argument("--modos", nargs="*", default=MODOS)
     ap.add_argument("--niveis", nargs="*", type=int, default=None,
                     help="processos do stress-ng; padrão: 0, N/2, N, 2N (N = CPUs lógicas)")
+    ap.add_argument("--cpus", type=int, default=None,
+                    help="confina Nginx, cliente e stress-ng às CPUs 0..K-1 (amplia a contenção); N passa a valer K")
+    ap.add_argument("--governador", default="performance",
+                    help="governador de frequência durante a rodada (restaurado ao final); 'nenhum' não altera")
     ap.add_argument("--ctl-alto", type=float, default=0.02, help="limiar de espera (fração do tempo) para agir")
     ap.add_argument("--ctl-baixo", type=float, default=0.005, help="limiar de espera para relaxar")
     ap.add_argument("--ctl-observar", action="store_true", help="controlador só registra, não age")
     ap.add_argument("--ebpf", action="store_true", help="grava também a espera medida pelo bpftrace")
     args = ap.parse_args()
     if args.niveis is None:
-        n = os.cpu_count()
+        n = args.cpus or os.cpu_count()
         args.niveis = sorted({0, max(1, n // 2), n, 2 * n})
 
     if os.geteuid() != 0:
         sys.exit("execute como root (cgroups, nice negativo e affinity)")
     RUNDIR.mkdir(exist_ok=True)
-    ncpu = os.cpu_count()
+    ncpu_total = os.cpu_count()
+    ncpu = args.cpus or ncpu_total
+    if ncpu > ncpu_total:
+        sys.exit(f"--cpus {ncpu} maior que as {ncpu_total} CPUs da máquina")
+    if args.cpus and ncpu_total > ncpu:   # orquestrador e monitor ficam fora das CPUs do experimento
+        os.sched_setaffinity(0, set(range(ncpu, ncpu_total)))
+    gov_ant = governador(None if args.governador == "nenhum" else args.governador)
+    atexit.register(restaurar_governador, gov_ant)
     semente = args.semente if args.semente is not None else int(time.time())
     rng = random.Random(semente)
 
@@ -349,7 +395,7 @@ def main():
     if csv_path.exists():
         sys.exit(f"{csv_path} já existe (nunca sobrescrever): use outra --rodada")
     (pasta / f"rodada{args.rodada}_{data}_meta.json").write_text(json.dumps(
-        {"semente": semente, "ncpu": ncpu, "args": vars(args), "kernel": os.uname().release}, indent=2))
+        {"semente": semente, "ncpu": ncpu, "ncpu_total": ncpu_total, "governador_anterior": sorted(set(gov_ant.values())), "args": vars(args), "kernel": os.uname().release}, indent=2))
 
     cg = Cgroups()
     print(f"{len(plano)} execuções | ncpu={ncpu} | cgroup v{cg.versao} | semente={semente}", flush=True)

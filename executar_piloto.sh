@@ -19,7 +19,7 @@ echo "[2/4] segmentos de vídeo"
 echo "[3/4] rodada (próxima rodada livre)"
 R=1; while ls resultados/brutos/rodada${R}_*.csv >/dev/null 2>&1; do R=$((R+1)); done
 python3 orquestrador/run_experimento.py --rodada "$R" --repeticoes "$REP" --duracao "$DUR" \
-        --warmup 2 --cooldown 2 --espectadores "${ESPECTADORES:-50}" --intervalo "${INTERVALO:-0.2}" ${NIVEIS:+--niveis $NIVEIS} ${CTL_ALTO:+--ctl-alto $CTL_ALTO} ${CTL_BAIXO:+--ctl-baixo $CTL_BAIXO}
+        --warmup 2 --cooldown 2 --espectadores "${ESPECTADORES:-50}" --intervalo "${INTERVALO:-0.2}" ${CPUS:+--cpus $CPUS} ${NIVEIS:+--niveis $NIVEIS} ${CTL_ALTO:+--ctl-alto $CTL_ALTO} ${CTL_BAIXO:+--ctl-baixo $CTL_BAIXO}
 
 echo "[4/4] análise e gráficos"
 python3 analise/analisar.py --rodada "$R"

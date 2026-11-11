@@ -1,0 +1,25 @@
+{
+  "semente": 1794180654,
+  "ncpu": 12,
+  "args": {
+    "rodada": 60,
+    "repeticoes": 1,
+    "duracao": 10.0,
+    "warmup": 2.0,
+    "cooldown": 2.0,
+    "espectadores": 20,
+    "intervalo": 0.25,
+    "semente": null,
+    "modos": [
+      "adaptativo"
+    ],
+    "niveis": [
+      12
+    ],
+    "ctl_alto": 0.02,
+    "ctl_baixo": 0.005,
+    "ctl_observar": false,
+    "ebpf": true
+  },
+  "kernel": "7.0.0-43-generic"
+}

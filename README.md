@@ -332,4 +332,4 @@ As principais medidas de mitigação são manter o conteúdo, a configuração d
 (`/proc/PID/schedstat`) a cada 200 ms e, se ela passar do limiar por 2 janelas seguidas, aperta o teto de CPU
 (`cpu.max`/`cpu.shares`) do grupo do `stress-ng` e aumenta o peso do servidor; relaxa quando a espera cai.
 `workloads/fila_cpu.bt` mede a mesma espera com eBPF (bpftrace; opcional, `--ebpf`).
-Calibração dos limiares: `--ctl-observar` + `analise/resumo_controlador.py`. Níveis padrão: 0, N/2, N, 2N.
+Calibração dos limiares: `--ctl-observar` + `analise/resumo_controlador.py`. Níveis padrão: 0, N/2, N, 2N. `--cpus K` confina Nginx, cliente e carga às CPUs 0..K-1 (N passa a valer K).

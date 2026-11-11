@@ -29,8 +29,9 @@ class Controlador(threading.Thread):
         self.periodo, self.alto, self.baixo = periodo, alto, baixo
         self.n_alto, self.n_baixo, self.intervalo_min = n_alto, n_baixo, intervalo_min
         self.observar = observar
-        # (cpu.weight do servidor, teto da carga como fração de TODAS as CPUs; None = sem teto)
-        self.passos = [(100, None), (400, 0.50), (1000, 0.25), (1000, 0.10)]
+        # (cpu.weight do servidor, cpu.weight da carga, teto da carga em fração de TODAS as CPUs; None = sem teto)
+        # Fase 1 (degrau 1): só pesos, barato para a carga. Fase 2 (degraus 2-4): teto de CPU na carga.
+        self.passos = [(100, 100, None), (400, 10, None), (400, 10, 0.50), (400, 10, 0.25), (400, 10, 0.10)]
         self.passo = 0
         self.acoes = 0
         self.t_primeira_acao = None
@@ -38,8 +39,9 @@ class Controlador(threading.Thread):
         self.t0 = None
 
     def aplicar(self, passo):
-        peso, teto = self.passos[passo]
-        self.cg.definir_peso("so_servidor", peso)
+        peso_srv, peso_carga, teto = self.passos[passo]
+        self.cg.definir_peso("so_servidor", peso_srv)
+        self.cg.definir_peso("so_carga", peso_carga)
         self.cg.definir_teto("so_carga", None if teto is None else teto * self.ncpu)
 
     def run(self):

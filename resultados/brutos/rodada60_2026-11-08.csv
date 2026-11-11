@@ -1,0 +1,2 @@
+rodada,run_id,ordem,modo,nivel_contencao,rep,inicio_iso,duracao_s,n_req,n_falhas,thr_req_s,thr_MBps,lat_media_ms,lat_mediana_ms,lat_p95_ms,lat_p99_ms,lat_max_ms,reb_20ms,reb_50ms,reb_100ms,cpu_servidor_pct,ctx_vol,ctx_invol,psi_some_us_por_s,cpu_host_pct,wait_nginx_ms_por_s,cpu_carga_cpus,ctl_acoes,ctl_reacao_s,ctl_passo_final,loadavg1,descartada,obs
+60,r60_001,1,adaptativo,12,1,2026-11-08T20:30:54,10.16,800,0,78.74,32.253,1.859,1.349,5.156,11.256,15.188,0.0,0.0,0.0,4.53,743,581,548411.3,69.2,22.42,6.208,1,2.404,1,6.27392578125,nao,
